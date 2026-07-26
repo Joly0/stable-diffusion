@@ -109,7 +109,12 @@ detect_cuda_profile() {
     echo "Detected: lowest compute capability ${SD_GPU_MIN_CC}, driver ${SD_DRIVER_MAJOR}.x"
 
     # 3. Walk profiles most-modern-first, take the first one this host satisfies.
+    #
+    # Track any profile the GPU itself qualifies for but the DRIVER rules out, so
+    # the user is told an upgrade is available. Without this an Ada or Blackwell
+    # card on an old driver silently lands on the legacy profile and looks fine.
     local profile min_int max_int
+    local held_back="" held_back_driver=""
     for profile in ${SD_CUDA_PROFILES}; do
         cuda_profile_config "$profile" || continue
 
@@ -121,9 +126,22 @@ detect_cuda_profile() {
             [ "${SD_GPU_MIN_CC_INT}" -gt "$max_int" ] && continue
         fi
 
-        [ "${SD_DRIVER_MAJOR}" -lt "${SD_MIN_DRIVER}" ] && continue
+        if [ "${SD_DRIVER_MAJOR}" -lt "${SD_MIN_DRIVER}" ]; then
+            # Remember only the first (most modern) one, and its requirement --
+            # cuda_profile_config overwrites SD_MIN_DRIVER on the next iteration.
+            if [ -z "$held_back" ]; then
+                held_back="$profile"
+                held_back_driver="${SD_MIN_DRIVER}"
+            fi
+            continue
+        fi
 
         echo "Selected profile: ${profile}"
+        if [ -n "$held_back" ]; then
+            echo "NOTE: this GPU also supports the newer '${held_back}' profile, which needs"
+            echo "NOTE: driver ${held_back_driver} or later -- this host has ${SD_DRIVER_MAJOR}.x."
+            echo "NOTE: Updating the NVIDIA driver would switch to it automatically."
+        fi
         _report_cuda_profile
         return 0
     done
