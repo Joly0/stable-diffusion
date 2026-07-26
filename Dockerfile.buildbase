@@ -55,10 +55,12 @@ ARG PYTHON_VERSION=3.12
 ARG PYTHON_TAG=cp312
 ENV SD_CUDA_PROFILE=${SD_CUDA_PROFILE}
 
-# Which packages to build. Lets CI run one job per package so each gets its own
-# 6 h budget and they run in parallel; a local build just leaves the default.
-ARG SD_BUILD_PACKAGES="flash-attn sageattention diso nvdiffrast kaolin"
-ENV SD_BUILD_PACKAGES=${SD_BUILD_PACKAGES}
+# NOTE: SD_BUILD_PACKAGES is deliberately declared LOWER DOWN, just above the
+# wheel builds. It is the only value that differs between the matrix jobs of a
+# profile, and an ENV layer invalidates every layer after it -- declaring it here
+# meant all four package jobs re-ran the ~8 minute apt + torch install instead of
+# sharing one cached copy of it. Everything above the wheel builds must depend
+# only on values that are constant across a profile.
 
 ARG TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0 10.0 12.0"
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
@@ -101,9 +103,14 @@ RUN apt-get update && apt-get install -y \
 ENV PATH="/usr/local/cuda/bin:/usr/lib/ccache:$PATH"
 ENV CPLUS_INCLUDE_PATH="/usr/local/cuda/include"
 
-# ccache fronts both the host compiler and nvcc. On a one-line change this turns
-# a multi-hour rebuild into minutes; CI persists /ccache via a BuildKit cache
-# mount so the saving carries across runs, not just across layers.
+# ccache fronts both the host compiler and nvcc, which helps a lot when the same
+# machine rebuilds repeatedly (local iteration).
+#
+# It does NOT help in CI: the contents of a `RUN --mount=type=cache` live in the
+# builder's own state and are NOT exported by `cache-to`, so a fresh runner
+# always starts with an empty /ccache. Cross-run reuse in CI comes from the
+# registry LAYER cache instead, which skips the whole RUN step rather than
+# speeding up its compiler invocations.
 ENV CCACHE_DIR=/ccache
 ENV CMAKE_C_COMPILER_LAUNCHER=ccache
 ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -222,6 +229,13 @@ EOF
 # one package. Steps skip themselves when SD_BUILD_PACKAGES excludes them, which
 # is how the CI matrix runs one package per job.
 # =============================================================================
+
+# Declared HERE, not at the top of the stage: this is the only value that varies
+# between the matrix jobs of one profile, so everything above it stays
+# byte-identical across those jobs and is fetched from the shared layer cache
+# instead of being rebuilt four times over.
+ARG SD_BUILD_PACKAGES="flash-attn sageattention diso nvdiffrast kaolin"
+ENV SD_BUILD_PACKAGES=${SD_BUILD_PACKAGES}
 
 # --- flash-attention: DOWNLOADED, not compiled ---
 # This used to be the single most expensive step in the repo (~96 CUDA files x

@@ -59,6 +59,7 @@ jobs:
       profiles: ${{ steps.gen.outputs.profiles }}
       builds: ${{ steps.gen.outputs.builds }}
       image_name: ${{ steps.owner.outputs.image_name }}
+      cache_name: ${{ steps.owner.outputs.cache_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +73,9 @@ jobs:
           set -euo pipefail
           owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "image_name=${owner}/sd-wheels" >> "$GITHUB_OUTPUT"
+          # Layer cache lives in its own GHCR repository so cache manifests never
+          # show up as published wheel tags.
+          echo "cache_name=${owner}/sd-wheels-cache" >> "$GITHUB_OUTPUT"
           echo "publishing to ghcr.io/${owner}/sd-wheels"
 
       - id: gen
@@ -128,6 +132,10 @@ jobs:
     needs: matrix
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    # Needed to read and write the registry layer cache below.
+    permissions:
+      packages: write
+      contents: read
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.matrix.outputs.builds) }}
@@ -147,6 +155,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
+
+      # Required for the registry layer cache -- without it cache-to silently
+      # fails and every run starts cold.
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build ${{ matrix.package }}
         uses: docker/build-push-action@v6
@@ -173,10 +189,18 @@ jobs:
             # reads the host's /proc/meminfo, not its cgroup cap, and would
             # otherwise size the job count for a much bigger machine.
             BUILD_MEM_GB=14
-          # Registry cache shared across runs. Scoped per profile+package so
-          # jobs never overwrite each other's cache.
-          cache-from: type=gha,scope=${{ matrix.profile }}-${{ matrix.package }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.profile }}-${{ matrix.package }}
+          # Registry cache, NOT type=gha. The GitHub Actions cache is capped at
+          # 10 GB per REPOSITORY, and one builder stage here is already ~13 GB
+          # (the nvidia/cuda devel base plus apt and torch). With mode=max and
+          # twelve matrix jobs the cap was blown on every run, GitHub evicted
+          # least-recently-used entries continuously, and essentially nothing
+          # survived to the next run -- which is why everything kept rebuilding.
+          #
+          # A registry has no such cap, and because all tags live in ONE GHCR
+          # repository the layers shared by every job are stored once and simply
+          # referenced by each tag, so per-job scopes cost almost nothing.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ needs.matrix.outputs.cache_name }}:${{ matrix.profile }}-${{ matrix.package }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ needs.matrix.outputs.cache_name }}:${{ matrix.profile }}-${{ matrix.package }},mode=max,image-manifest=true,oci-mediatypes=true
 
       - name: Show what was produced
         run: ls -la ./out/wheels || echo "no wheels produced"
