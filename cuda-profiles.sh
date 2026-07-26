@@ -227,5 +227,66 @@ cuda_profile_config() {
 #   SD_TORCH_VERSION_OVERRIDE=2.10.0 SD_TORCHVISION_VERSION_OVERRIDE=0.25.0  (cu130)
 #   SD_TORCH_VERSION_OVERRIDE=2.9.1  SD_TORCHVISION_VERSION_OVERRIDE=0.24.1  (cu126)
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# SageAttention build variants
+#
+# Some CUDA architectures cannot share a wheel with others. SageAttention hands
+# every CUDAExtension one shared NVCC_FLAGS list, with no per-extension arch
+# scoping, so a source file that uses arch-gated PTX gets compiled for every
+# requested target and ptxas rejects it. sm_90 is the current example: its
+# Hopper-only TMA/mbarrier instructions cannot be compiled for compute_80/86/89,
+# so asking for 9.0 alongside anything lower fails the whole build.
+#
+# Upstream does not really support multi-arch redistributable builds at all --
+# its documented install path compiles on the target machine, where only the
+# local GPU's capability is emitted (see the open "support TORCH_CUDA_ARCH_LIST"
+# issues). We build fat wheels, so we hit this and they do not.
+#
+# The fix is to build such architectures as SEPARATE wheels and choose between
+# them at container start, which the runtime already has the information to do.
+#
+# ADDING A FUTURE ARCHITECTURE that turns out to be similarly exclusive is a
+# config change only: add its name here and a case below. Nothing in the
+# Dockerfile, the CI matrix or the runtime selector needs to know about it --
+# the selector derives which variant serves a GPU from the arch lists
+# themselves, using the CUDA binary-compatibility rule.
+SD_SAGE_VARIANTS="sm90"
+
+# sage_variant_arches <variant> -> the arch list that variant is compiled for.
+# Must be semicolon separated, for the reason documented on SD_SAGE_ARCH_LIST.
+sage_variant_arches() {
+    case "$1" in
+        # Hopper. A 9.0 build is complete rather than partial: _qattn_sm80 and
+        # _qattn_sm89 are also gated on HAS_SM90, so every module is built, just
+        # with Hopper gencode.
+        sm90) echo "9.0" ;;
+        *) return 1 ;;
+    esac
+}
+
+# sage_variant_serves <arch-list> <compute-cap>
+#
+# True when a wheel built for <arch-list> contains a cubin that can execute on a
+# GPU of <compute-cap>, per CUDA binary compatibility: a cubin for X.y runs on
+# X.z when z >= y, and never across a different major.
+#
+# This is what makes the mechanism future proof -- variants are matched by what
+# they can actually run, not by a hardcoded name-to-GPU table.
+sage_variant_serves() {
+    local arch_list="$1" cc="$2"
+    local cc_major="${cc%%.*}" cc_minor="${cc#*.}"
+    [ "$cc_minor" = "$cc" ] && cc_minor=0
+    local entry a_major a_minor
+    for entry in $(printf '%s' "$arch_list" | tr ',;' '  '); do
+        entry="${entry%+PTX}"; entry="${entry%+ptx}"; entry="${entry%a}"
+        [ -z "$entry" ] && continue
+        a_major="${entry%%.*}"; a_minor="${entry#*.}"
+        [ "$a_minor" = "$entry" ] && a_minor=0
+        [ "$a_major" = "$cc_major" ] || continue
+        [ "$a_minor" -le "$cc_minor" ] && return 0
+    done
+    return 1
+}
+
 SD_FLASH_ATTN_VERSION="2.8.3"
 SD_FLASH_ATTN_REPO="Dao-AILab/flash-attention"

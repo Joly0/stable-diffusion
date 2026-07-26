@@ -192,6 +192,19 @@ CI ([`build-wheels.yml`](/.github/workflows/build-wheels.yml)) runs one job per
 compile into one memory/time budget. It only triggers on `workflow_dispatch` and on
 changes to the files that actually invalidate wheels.
 
+SageAttention is shipped as more than one build. Some CUDA architectures cannot
+share a wheel — sm_90 (Hopper) uses TMA/mbarrier instructions that cannot be
+compiled for older targets, and upstream applies one arch list to every
+extension — so those are built separately into `/wheels/<profile>/<variant>/`
+and chosen at container start. The choice comes from CUDA binary compatibility
+(a cubin for `X.y` runs on `X.z` when `z >= y`), not a hardcoded GPU list, so
+supporting a future exclusive architecture is a `cuda-profiles.sh` entry rather
+than a code change.
+
+GPUs older than sm_80 get no SageAttention wheel at all — it has no kernels for
+them, and installing one would make the UI select it and fail on every attention
+call rather than falling back cleanly.
+
 Run the profile-selection tests with `./tests/test-cuda-profiles.sh`.
 
 ##### Forks

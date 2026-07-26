@@ -283,15 +283,89 @@ export_nvidia_lib_path() {
 # Installs every prebuilt wheel that matches the active profile, if any exist.
 # A missing wheel is not fatal -- it only means the package is unavailable or
 # has to be installed from source by the UI itself.
+# Prints the directory holding the SageAttention wheel that can actually run on
+# this GPU, when that is NOT the default one. Returns 1 when the default serves.
+#
+# Some architectures cannot share a wheel with others (see SD_SAGE_VARIANTS in
+# cuda-profiles.sh), so they are built separately and chosen here. The choice is
+# derived from the arch lists via CUDA binary compatibility rather than from a
+# hardcoded GPU table, so a future exclusive architecture needs no change here.
+_sage_variant_dir() {
+    [ -n "${SD_WHEELS_DIR}" ] || return 1
+    [ -n "${SD_GPU_MIN_CC}" ] || return 1
+    command -v sage_variant_serves >/dev/null 2>&1 || return 1
+
+    # The default wheel already covers this GPU.
+    sage_variant_serves "${SD_SAGE_ARCH_LIST}" "${SD_GPU_MIN_CC}" && return 1
+
+    local variant arches
+    for variant in ${SD_SAGE_VARIANTS}; do
+        arches=$(sage_variant_arches "$variant") || continue
+        sage_variant_serves "$arches" "${SD_GPU_MIN_CC}" || continue
+        if [ -d "${SD_WHEELS_DIR}/${variant}" ]; then
+            printf '%s' "${SD_WHEELS_DIR}/${variant}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 install_profile_wheels() {
     if [ -z "${SD_WHEELS_DIR}" ] || ! compgen -G "${SD_WHEELS_DIR}/*.whl" >/dev/null; then
         echo "No prebuilt wheels for profile ${SD_CUDA_PROFILE:-<none>}, skipping."
         return 0
     fi
+
+    local variant_dir=""
+    variant_dir=$(_sage_variant_dir) || variant_dir=""
+
+    # Does ANY available SageAttention build have kernels this GPU can run?
+    # Turing and older have none (SageAttention needs sm_80+), and installing a
+    # wheel with no usable kernels is worse than not installing it: the UI then
+    # selects it and every attention call errors with
+    # "SM<xx> kernel is not available". Leaving it out lets the UI fall back,
+    # and lets 05.sh install the Triton-only PyPI build instead.
+    local sage_usable=1
+    if command -v sage_variant_serves >/dev/null 2>&1 && [ -n "${SD_GPU_MIN_CC}" ]; then
+        sage_usable=0
+        sage_variant_serves "${SD_SAGE_ARCH_LIST}" "${SD_GPU_MIN_CC}" && sage_usable=1
+        [ -n "$variant_dir" ] && sage_usable=1
+    fi
+
+    local -a wheels=()
+    local w base
+    for w in "${SD_WHEELS_DIR}"/*.whl; do
+        [ -e "$w" ] || continue
+        base=$(basename "$w")
+        case "$base" in
+            sageattention-*)
+                # Skip the default sage wheel when a variant supersedes it, or
+                # when no build serves this GPU at all.
+                [ -n "$variant_dir" ] && continue
+                [ "$sage_usable" = "0" ] && continue
+                ;;
+        esac
+        wheels+=("$w")
+    done
+
+    if [ -n "$variant_dir" ]; then
+        echo "SageAttention: compute capability ${SD_GPU_MIN_CC} needs the '$(basename "$variant_dir")' build"
+        for w in "${variant_dir}"/*.whl; do
+            [ -e "$w" ] && wheels+=("$w")
+        done
+    elif [ "$sage_usable" = "0" ]; then
+        echo "SageAttention: no build has kernels for compute capability ${SD_GPU_MIN_CC}, skipping it"
+    fi
+
+    if [ ${#wheels[@]} -eq 0 ]; then
+        echo "No applicable prebuilt wheels for this GPU, skipping."
+        return 0
+    fi
+
     echo "Installing prebuilt wheels from ${SD_WHEELS_DIR}"
     # --no-deps: these wheels declare a bare `torch` requirement, and without
     # this pip happily REPLACES the profile-matched torch we just installed.
-    pip install --no-deps "${SD_WHEELS_DIR}"/*.whl
+    pip install --no-deps "${wheels[@]}"
 }
 
 #Function to move folder and replace with symlink

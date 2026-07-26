@@ -29,6 +29,7 @@ mode="${1:?usage: profile-matrix.sh profiles|builds}"
 packages="${SD_BUILD_PACKAGES:-sageattention diso nvdiffrast kaolin}"
 profiles="${SD_PROFILES:-${SD_CUDA_PROFILES}}"
 
+# emit_profile_json <profile> [package] [sage_arch_list] [wheel_subdir]
 emit_profile_json() {
     local p="$1"
     cuda_profile_config "$p" >/dev/null
@@ -44,16 +45,42 @@ print(json.dumps({
     "arch_list":    sys.argv[7],
     "sage_arch_list": sys.argv[8],
     "package":      sys.argv[9],
+    "wheel_subdir": sys.argv[10],
+    "job":          sys.argv[9] + ("-" + sys.argv[10] if sys.argv[10] else ""),
 }))' "$p" "$SD_CUDA_MAJOR" "$SD_CUDA_IMAGE" "$TORCH_INDEX_URL" \
      "$SD_TORCH_VERSION" "$SD_TORCH_SPEC" "$TORCH_CUDA_ARCH_LIST" \
-     "$SD_SAGE_ARCH_LIST" "${2:-}"
+     "${3:-$SD_SAGE_ARCH_LIST}" "${2:-}" "${4:-}"
+}
+
+# Does this profile have GPUs that a given variant would serve? A profile whose
+# compute-capability ceiling is below the variant should not waste a CI job on
+# it. SD_MAX_COMPUTE_CAP of "none" means unbounded.
+profile_wants_variant() {
+    local arches="$1"
+    [ "${SD_MAX_COMPUTE_CAP}" = "none" ] && return 0
+    sage_variant_serves "$arches" "${SD_MAX_COMPUTE_CAP}"
 }
 
 {
     for p in $profiles; do
         case "$mode" in
             profiles) emit_profile_json "$p" ;;
-            builds)   for pkg in $packages; do emit_profile_json "$p" "$pkg"; done ;;
+            builds)
+                for pkg in $packages; do
+                    emit_profile_json "$p" "$pkg"
+                    # SageAttention additionally gets one job per arch variant --
+                    # architectures that cannot share a wheel with the default
+                    # set. Purely config driven from cuda-profiles.sh.
+                    if [ "$pkg" = "sageattention" ]; then
+                        for variant in ${SD_SAGE_VARIANTS:-}; do
+                            varches=$(sage_variant_arches "$variant") || continue
+                            cuda_profile_config "$p" >/dev/null
+                            profile_wants_variant "$varches" || continue
+                            emit_profile_json "$p" "$pkg" "$varches" "$variant"
+                        done
+                    fi
+                done
+                ;;
             *) echo "unknown mode '$mode'" >&2; exit 1 ;;
         esac
     done

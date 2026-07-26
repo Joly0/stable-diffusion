@@ -128,7 +128,7 @@ jobs:
   # Compiled wheels: one job per (profile, package).
   # ---------------------------------------------------------------------------
   build:
-    name: ${{ matrix.package }} (${{ matrix.profile }})
+    name: ${{ matrix.job }} (${{ matrix.profile }})
     needs: matrix
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -183,6 +183,7 @@ jobs:
             TORCH_CUDA_ARCH_LIST=${{ matrix.arch_list }}
             SD_SAGE_ARCH_LIST=${{ matrix.sage_arch_list }}
             SD_BUILD_PACKAGES=${{ matrix.package }}
+            SD_WHEEL_SUBDIR=${{ matrix.wheel_subdir }}
             PYTHON_VERSION=${{ env.PYTHON_VERSION }}
             PYTHON_TAG=${{ env.PYTHON_TAG }}
             # Hosted runners have 16 GB. Tell max-jobs explicitly: a RUN step
@@ -199,16 +200,21 @@ jobs:
           # A registry has no such cap, and because all tags live in ONE GHCR
           # repository the layers shared by every job are stored once and simply
           # referenced by each tag, so per-job scopes cost almost nothing.
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ needs.matrix.outputs.cache_name }}:${{ matrix.profile }}-${{ matrix.package }}
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ needs.matrix.outputs.cache_name }}:${{ matrix.profile }}-${{ matrix.package }},mode=max,image-manifest=true,oci-mediatypes=true
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ needs.matrix.outputs.cache_name }}:${{ matrix.profile }}-${{ matrix.job }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ needs.matrix.outputs.cache_name }}:${{ matrix.profile }}-${{ matrix.job }},mode=max,image-manifest=true,oci-mediatypes=true
 
       - name: Show what was produced
-        run: ls -la ./out/wheels || echo "no wheels produced"
+        run: find ./out/wheels -name '*.whl' 2>/dev/null || echo "no wheels produced"
 
+      # Uploads stay FLAT (a variant build writes to ./out/wheels/<subdir>).
+      # The artifact NAME carries the variant, and the assemble job puts it back
+      # into the right subdirectory -- structure inside artifacts is not relied
+      # upon, because upload-artifact re-roots at the common ancestor of the
+      # matched files and would silently flatten a single-file variant upload.
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.profile }}-${{ matrix.package }}
-          path: ./out/wheels/*.whl
+          name: wheels-${{ matrix.profile }}-${{ matrix.job }}
+          path: ./out/wheels/${{ matrix.wheel_subdir }}/*.whl
           if-no-files-found: ignore
           retention-days: 3
 
@@ -231,18 +237,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # merge-multiple is deliberately OFF: each artifact lands in its own
+      # directory named after the artifact, which is how a variant's sage wheel
+      # is told apart from the default one. They share a filename, so a merged
+      # download would have one silently overwrite the other.
       - name: Download this profile's wheels
         uses: actions/download-artifact@v4
         with:
           pattern: wheels-${{ matrix.profile }}-*
           path: staging
-          merge-multiple: true
 
       - name: Collect and describe
         run: |
           set -euo pipefail
           mkdir -p wheels
-          find staging -name '*.whl' -exec cp -v {} wheels/ \; 2>/dev/null || true
+          . ./cuda-profiles.sh
+          for dir in staging/*/; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            dest="wheels"
+            # Artifact names end in the variant name for variant builds.
+            for variant in ${SD_SAGE_VARIANTS:-}; do
+              case "$name" in *"-${variant}") dest="wheels/${variant}" ;; esac
+            done
+            mkdir -p "$dest"
+            find "$dir" -name '*.whl' -exec cp -v {} "$dest/" \; 2>/dev/null || true
+          done
           {
             echo "profile=${{ matrix.profile }}"
             echo "cuda_major=${{ matrix.cuda_major }}"
@@ -258,6 +278,12 @@ jobs:
             # would include the manifest as one of its own wheels.
             for whl in wheels/*.whl; do
               [ -e "$whl" ] && echo "  ${whl##*/}"
+            done
+            for vdir in wheels/*/; do
+              [ -d "$vdir" ] || continue
+              for whl in "$vdir"*.whl; do
+                [ -e "$whl" ] && echo "  ${vdir#wheels/}${whl##*/}"
+              done
             done
           } > wheels/MANIFEST.txt
           cat wheels/MANIFEST.txt
