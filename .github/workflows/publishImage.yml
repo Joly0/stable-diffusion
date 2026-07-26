@@ -81,12 +81,36 @@ jobs:
           echo "ghcr=${ghcr}" >> "$GITHUB_OUTPUT"
           echo "publishing to ${ghcr}"
 
-          if [ -n "${DOCKERHUB_IMAGE_NAME}" ]; then
-            echo "dockerhub=${DOCKERHUB_IMAGE_NAME}" >> "$GITHUB_OUTPUT"
-            echo "and to Docker Hub: ${DOCKERHUB_IMAGE_NAME}"
+          # Docker Hub auto-creates a repository on first push, but ONLY inside a
+          # namespace you own. An unqualified name is NOT "your repo that does
+          # not exist yet" -- Docker resolves it to docker.io/library/<name>, the
+          # official-images namespace, which nobody can push to. The result is
+          #     insufficient_scope: authorization failed
+          # after the whole image has already been built. So normalise here, and
+          # do it before the build rather than discovering it 40 minutes in.
+          dockerhub=""
+          if [ -n "${DOCKERHUB_IMAGE_NAME:-}" ]; then
+            case "${DOCKERHUB_IMAGE_NAME:-}" in
+              */*)
+                dockerhub="${DOCKERHUB_IMAGE_NAME:-}"
+                ;;
+              *)
+                if [ -n "${DOCKERHUB_USER:-}" ]; then
+                  dockerhub="${DOCKERHUB_USER:-}/${DOCKERHUB_IMAGE_NAME:-}"
+                  echo "::warning::DOCKERHUB_IMAGE_NAME='${DOCKERHUB_IMAGE_NAME}' has no namespace, which would target docker.io/library/${DOCKERHUB_IMAGE_NAME} and fail. Using '${dockerhub}' instead -- set the variable to '${dockerhub}' to silence this."
+                else
+                  echo "::warning::DOCKERHUB_IMAGE_NAME='${DOCKERHUB_IMAGE_NAME}' has no namespace and DOCKER_USERNAME is not set, so the target cannot be determined. Skipping Docker Hub."
+                fi
+                ;;
+            esac
+          fi
+
+          if [ -n "${dockerhub}" ]; then
+            echo "dockerhub=${dockerhub}" >> "$GITHUB_OUTPUT"
+            echo "and to Docker Hub: ${dockerhub}"
           else
             echo "dockerhub=" >> "$GITHUB_OUTPUT"
-            echo "Docker Hub skipped (DOCKERHUB_IMAGE_NAME variable not set)"
+            echo "Docker Hub skipped (DOCKERHUB_IMAGE_NAME variable not set or unusable)"
           fi
 
       # Only attempt a Docker Hub login when there is actually something to log

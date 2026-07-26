@@ -229,9 +229,12 @@ jobs:
             echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "commit=${GITHUB_SHA}"
             echo "wheels:"
-            # grep -v MANIFEST: the redirection below creates MANIFEST.txt before
-            # this block runs, so an unfiltered ls lists the manifest as a wheel.
-            ls -1 wheels 2>/dev/null | grep -v MANIFEST | sed 's/^/  /'
+            # Glob *.whl rather than listing the directory: the redirection below
+            # creates MANIFEST.txt before this block runs, so a plain listing
+            # would include the manifest as one of its own wheels.
+            for whl in wheels/*.whl; do
+              [ -e "$whl" ] && echo "  ${whl##*/}"
+            done
           } > wheels/MANIFEST.txt
           cat wheels/MANIFEST.txt
 
