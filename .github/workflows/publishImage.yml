@@ -1,6 +1,24 @@
 name: Publish Docker image to Dockerhub and GHCR
 
+# Builds the runtime image and pushes it.
+#
+# This workflow previously could not be started at all from the Actions tab: it
+# had no workflow_dispatch trigger, so there was no "Run workflow" button, and
+# its push triggers only matched the 'test' and 'Holaf_tests' branches plus
+# version tags. Any other branch produced no run whatsoever.
+
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Extra tag to publish (e.g. latest). Blank = branch/tag name only.'
+        required: false
+        default: ''
+      push:
+        description: 'Push to the registry (uncheck to build only)'
+        type: boolean
+        required: false
+        default: true
   push:
     branches:
       - 'test'
@@ -15,64 +33,102 @@ jobs:
   push_to_registry:
     name: Push Docker image to Docker Hub
     runs-on: ubuntu-latest
-    # only run if we've specified image tag to push to
-    if: ${{ vars.DOCKERHUB_IMAGE_NAME != '' ||  vars.GHCR_IMAGE_NAME != '' }}
-    # https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token
+    # NOTE: the old job-level `if` skipped everything unless a DOCKERHUB_IMAGE_NAME
+    # or GHCR_IMAGE_NAME repository variable was configured -- and it skipped with
+    # a green tick, so a fresh fork looked like it had succeeded while publishing
+    # nothing. Image names are now resolved with a sensible GHCR default instead.
     permissions:
       packages: write
       contents: read
+    # The `secrets` context is NOT available in a step-level `if` -- only job
+    # level `env` can read it. Lifting it here is what lets the Docker Hub login
+    # below skip itself cleanly on a repo that has no Docker Hub credentials.
+    env:
+      DOCKERHUB_USER: ${{ secrets.DOCKER_USERNAME }}
     steps:
-#      - name: Free Disk Space
-#        uses: jlumbroso/free-disk-space@main
-#        with:
-#          tool-cache: true
+      # The runtime image is big: the kasmvnc base plus cuda-toolkit-13-0 (~7 GB),
+      # dotnet-sdk-8.0 and Miniforge. A hosted runner starts with ~14 GB free,
+      # which is not enough. This step reclaims 20-30 GB and must come first.
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
 
-          # all of these default to true, but feel free to set to
-          # false if necessary for your workflow
-#          android: true
-#          dotnet: true
-#          haskell: true
-#          large-packages: true
-#          swap-storage: true
       - name: Check out the repo
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
+      # Resolve where to publish. Repository variables win when set; otherwise
+      # default to GHCR under this repository's owner, so a fork publishes
+      # somewhere sensible with zero configuration.
+      - name: Resolve image names
+        id: names
+        env:
+          DOCKERHUB_IMAGE_NAME: ${{ vars.DOCKERHUB_IMAGE_NAME }}
+          GHCR_IMAGE_NAME: ${{ vars.GHCR_IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+          # GITHUB_REPOSITORY is always "owner/repo"; github.event.repository is
+          # not populated for every event type. GHCR also rejects uppercase.
+          owner=$(echo "${GITHUB_REPOSITORY%%/*}" | tr '[:upper:]' '[:lower:]')
+          repo=$(echo "${GITHUB_REPOSITORY##*/}" | tr '[:upper:]' '[:lower:]')
+
+          ghcr="${GHCR_IMAGE_NAME:-ghcr.io/${owner}/${repo}}"
+          echo "ghcr=${ghcr}" >> "$GITHUB_OUTPUT"
+          echo "publishing to ${ghcr}"
+
+          if [ -n "${DOCKERHUB_IMAGE_NAME}" ]; then
+            echo "dockerhub=${DOCKERHUB_IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+            echo "and to Docker Hub: ${DOCKERHUB_IMAGE_NAME}"
+          else
+            echo "dockerhub=" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub skipped (DOCKERHUB_IMAGE_NAME variable not set)"
+          fi
+
+      # Only attempt a Docker Hub login when there is actually something to log
+      # in with. Previously this ran unconditionally and failed the whole job on
+      # any repo without DOCKER_USERNAME / DOCKER_PASSWORD secrets.
       - name: Log in to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v2
+        if: ${{ github.event_name != 'pull_request' && steps.names.outputs.dockerhub != '' && env.DOCKERHUB_USER != '' }}
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
+      # Unconditional (for non-PR runs): GHCR is now always a publish target, and
+      # the login is also what lets the wheels probe below read private packages.
       - name: Login to GitHub Container Registry
-        if: ${{ github.event_name != 'pull_request' && vars.GHCR_IMAGE_NAME != '' }}
-        uses: docker/login-action@v2
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Extract metadata (tags, labels) for Docker
         id: meta
-        uses: docker/metadata-action@v3
+        uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ vars.DOCKERHUB_IMAGE_NAME }}
-            ${{ vars.GHCR_IMAGE_NAME }}
+            ${{ steps.names.outputs.dockerhub }}
+            ${{ steps.names.outputs.ghcr }}
           # generate Docker tags based on the following events/attributes
           tags: |
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
-            type=ref,event=branch,enable=${{ !endsWith(github.ref, 'main') }}
+            type=ref,event=branch
+            type=ref,event=tag
             type=semver,pattern={{version}}
-#            type=raw,value=latest,enable=${{ endsWith(github.ref, 'main') }}
-#          flavor: |
-#            latest=false
+            type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event.inputs.tag != '' }}
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
 
       # Forks should consume their OWN prebuilt wheels without having to edit the
       # Dockerfile, but must not break before they have published any. So: use
@@ -111,10 +167,10 @@ jobs:
           fi
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' && !env.ACT}}
+          push: ${{ github.event_name != 'pull_request' && github.event.inputs.push != 'false' && !env.ACT }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64
@@ -122,3 +178,17 @@ jobs:
           # skips build-args whose value is empty.
           build-args: |
             ${{ steps.wheels.outputs.image && format('WHEELS_IMAGE={0}', steps.wheels.outputs.image) || '' }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Runtime image"
+            echo ""
+            echo "Wheels source: \`${{ steps.wheels.outputs.image || 'Dockerfile default (upstream)' }}\`"
+            echo ""
+            echo "Tags:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
