@@ -62,12 +62,13 @@ ENV SD_CUDA_PROFILE=${SD_CUDA_PROFILE}
 # sharing one cached copy of it. Everything above the wheel builds must depend
 # only on values that are constant across a profile.
 
-ARG TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0 10.0 12.0"
+ARG TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 
-# SageAttention only ships kernels for sm80/86/89/90/120, so it gets its own
-# narrower list. Arches outside that set are ignored or error out.
-ARG SD_SAGE_ARCH_LIST="8.0 8.6 8.9 9.0 12.0"
+# SageAttention only ships kernels for sm80/86/89/90/100/120, so it gets its own
+# narrower list. SEMICOLONS ARE MANDATORY here -- see the note above its build
+# step; a space-separated list silently degrades to sm_80 only.
+ARG SD_SAGE_ARCH_LIST="8.0;8.6;8.9;9.0;10.0;12.0"
 
 ARG SD_FLASH_ATTN_VERSION=2.8.3
 ARG SD_FLASH_ATTN_REPO=Dao-AILab/flash-attention
@@ -262,6 +263,16 @@ RUN chmod +x /usr/local/bin/fetch-flash-attn \
 #
 # setup.py falls back to TORCH_CUDA_ARCH_LIST when no GPU is present, so it
 # builds fine headless. NVCC_THREADS=1 for the reason in the max-jobs comment.
+COPY scripts/verify-wheel-arches.sh /usr/local/bin/verify-wheel-arches
+RUN chmod +x /usr/local/bin/verify-wheel-arches
+
+# SD_SAGE_ARCH_LIST must be SEMICOLON separated. SageAttention parses it with
+# `arch_list_env.replace(",", ";").split(";")`, which never splits on spaces, so
+# a space-separated list becomes ONE bogus capability that still matches
+# startswith("8.0") -- the build then succeeds while emitting sm_80 kernels only.
+# That is not theoretical: it shipped, and every non-A100 card fell back to
+# PyTorch attention with "SM89 kernel is not available". verify-wheel-arches
+# checks the produced cubins so it cannot happen silently again.
 RUN --mount=type=cache,target=/ccache,sharing=locked \
     if want-pkg sageattention; then \
       git clone --depth 1 https://github.com/thu-ml/SageAttention.git --recurse-submodules \
@@ -270,6 +281,7 @@ RUN --mount=type=cache,target=/ccache,sharing=locked \
       && TORCH_CUDA_ARCH_LIST="${SD_SAGE_ARCH_LIST}" \
          NVCC_APPEND_FLAGS="--threads 1" \
          MAX_JOBS=$(max-jobs 5) python${PYTHON_VERSION} setup.py bdist_wheel \
+      && verify-wheel-arches dist/*.whl "${SD_SAGE_ARCH_LIST}" \
       && cp dist/*.whl /build/ \
       && cd /build && rm -rf SageAttention; \
     else echo "skip sageattention"; fi

@@ -128,8 +128,8 @@ cuda_profile_config() {
             # only the MAJOR has to match.
             export SD_CUDA_HOME="/usr/local/cuda-13.0"
             export TORCH_INDEX_URL="https://download.pytorch.org/whl/cu132"
-            export TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0 10.0 12.0"
-            export SD_SAGE_ARCH_LIST="8.0 8.6 8.9 9.0 12.0"
+            export TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"
+            export SD_SAGE_ARCH_LIST="8.0;8.6;8.9;9.0;10.0;12.0"
             export SD_MIN_COMPUTE_CAP="7.5"
             export SD_MAX_COMPUTE_CAP="none"
             export SD_MIN_DRIVER="595"
@@ -140,7 +140,7 @@ cuda_profile_config() {
             export SD_CUDA_IMAGE="nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04"
             export SD_CUDA_HOME="/usr/local/cuda-13.0"
             export TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
-            export TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0 10.0 12.0"
+            export TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"
             # 10.0 (datacenter Blackwell: B100/B200/GB200) must be listed
             # explicitly. It is a different compute-capability MAJOR from both
             # 9.0 and 12.0, so no other cubin here can serve it -- binary
@@ -150,7 +150,7 @@ cuda_profile_config() {
             #
             # 12.1 is deliberately absent: the 12.0 cubin covers it under that
             # same rule, which is why pytorch's own arch table stops at 120.
-            export SD_SAGE_ARCH_LIST="8.0 8.6 8.9 9.0 10.0 12.0"
+            export SD_SAGE_ARCH_LIST="8.0;8.6;8.9;9.0;10.0;12.0"
             export SD_MIN_COMPUTE_CAP="7.5"
             export SD_MAX_COMPUTE_CAP="none"
             export SD_MIN_DRIVER="580"
@@ -164,8 +164,8 @@ cuda_profile_config() {
             # CUDA 13 toolkit purely so this profile can compile extensions.
             export SD_CUDA_HOME="/usr/local/cuda-12.6"
             export TORCH_INDEX_URL="https://download.pytorch.org/whl/cu126"
-            export TORCH_CUDA_ARCH_LIST="6.1 7.0 7.5 8.0 8.6 8.9 9.0"
-            export SD_SAGE_ARCH_LIST="8.0 8.6 8.9 9.0"
+            export TORCH_CUDA_ARCH_LIST="6.1;7.0;7.5;8.0;8.6;8.9;9.0"
+            export SD_SAGE_ARCH_LIST="8.0;8.6;8.9;9.0"
             export SD_MIN_COMPUTE_CAP="5.0"
             # Hard upper bound: cu126 has no sm_100/sm_120 kernels, so a
             # Blackwell card must never be routed here even though it satisfies
