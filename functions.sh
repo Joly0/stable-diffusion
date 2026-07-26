@@ -1,5 +1,275 @@
 #!/bin/bash
 
+# =============================================================================
+# CUDA profile selection
+#
+# Every UI installs its own torch into its own conda env at first launch, which
+# means "which CUDA build does this machine need" is a STARTUP decision, not a
+# build decision. Nothing extra is downloaded because of this -- it is the same
+# torch download, just from the index that matches the GPU and driver.
+#
+# Profile definitions (versions, arch lists, thresholds) live in
+# cuda-profiles.sh. Nothing here hardcodes a version.
+# =============================================================================
+
+# shellcheck source=cuda-profiles.sh
+if [ -f /cuda-profiles.sh ]; then
+    . /cuda-profiles.sh
+elif [ -f "$(dirname "${BASH_SOURCE[0]}")/cuda-profiles.sh" ]; then
+    . "$(dirname "${BASH_SOURCE[0]}")/cuda-profiles.sh"
+fi
+
+# Normalise "8.6" -> 86 so compute capabilities can be compared as integers.
+# Handles a missing minor ("9" -> 90) and rejects anything non-numeric.
+_cc_to_int() {
+    local cc="$1" major minor
+    case "$cc" in
+        *[!0-9.]*|'') return 1 ;;
+    esac
+    major="${cc%%.*}"
+    minor="${cc#*.}"
+    [ "$minor" = "$cc" ] && minor=0
+    minor="${minor%%.*}"
+    [ -z "$major" ] && return 1
+    [ -z "$minor" ] && minor=0
+    echo $(( major * 10 + minor ))
+}
+
+# Populates SD_GPU_MIN_CC (weakest GPU in the box) and SD_DRIVER_MAJOR.
+# Returns 1 when no usable GPU information is available.
+#
+# The WEAKEST GPU wins deliberately: in a mixed-GPU machine every UI runs one
+# torch install, so it has to be the one that all cards can execute.
+detect_gpu_capabilities() {
+    command -v nvidia-smi >/dev/null 2>&1 || return 1
+
+    local caps drivers cc cc_int lowest=""
+    caps=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null) || return 1
+    [ -z "$caps" ] && return 1
+
+    while IFS= read -r cc; do
+        cc="${cc// /}"
+        [ -z "$cc" ] && continue
+        cc_int=$(_cc_to_int "$cc") || continue
+        if [ -z "$lowest" ] || [ "$cc_int" -lt "$lowest" ]; then
+            lowest="$cc_int"
+            SD_GPU_MIN_CC="$cc"
+        fi
+    done <<< "$caps"
+
+    [ -z "$lowest" ] && return 1
+    SD_GPU_MIN_CC_INT="$lowest"
+
+    drivers=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n 1)
+    SD_DRIVER_MAJOR="${drivers%%.*}"
+    SD_DRIVER_MAJOR="${SD_DRIVER_MAJOR// /}"
+    case "$SD_DRIVER_MAJOR" in
+        ''|*[!0-9]*) SD_DRIVER_MAJOR=0 ;;
+    esac
+
+    export SD_GPU_MIN_CC SD_GPU_MIN_CC_INT SD_DRIVER_MAJOR
+    return 0
+}
+
+# Selects a CUDA profile for this host and exports the full config for it.
+#
+# Honours an explicit SD_CUDA_PROFILE from the environment (docker -e
+# SD_CUDA_PROFILE=cu126) so users can override a bad autodetect without
+# rebuilding anything.
+detect_cuda_profile() {
+    echo "-------------------------------------"
+    echo "Selecting CUDA profile"
+
+    if ! command -v cuda_profile_config >/dev/null 2>&1; then
+        echo "WARNING: cuda-profiles.sh not found, CUDA profile selection disabled."
+        echo -e "-------------------------------------\n"
+        return 1
+    fi
+
+    # 1. Explicit user override always wins.
+    if [ -n "${SD_CUDA_PROFILE}" ]; then
+        if cuda_profile_config "${SD_CUDA_PROFILE}"; then
+            echo "Profile forced by SD_CUDA_PROFILE: ${SD_CUDA_PROFILE}"
+            _report_cuda_profile
+            return 0
+        fi
+        echo "WARNING: SD_CUDA_PROFILE='${SD_CUDA_PROFILE}' is not a known profile, ignoring."
+        unset SD_CUDA_PROFILE
+    fi
+
+    # 2. No GPU visible -> widest-compatibility fallback.
+    if ! detect_gpu_capabilities; then
+        echo "No usable nvidia-smi output (no GPU passed through?)."
+        echo "Falling back to ${SD_CUDA_PROFILE_FALLBACK}, which has the widest hardware coverage."
+        cuda_profile_config "${SD_CUDA_PROFILE_FALLBACK}"
+        _report_cuda_profile
+        return 0
+    fi
+
+    echo "Detected: lowest compute capability ${SD_GPU_MIN_CC}, driver ${SD_DRIVER_MAJOR}.x"
+
+    # 3. Walk profiles most-modern-first, take the first one this host satisfies.
+    local profile min_int max_int
+    for profile in ${SD_CUDA_PROFILES}; do
+        cuda_profile_config "$profile" || continue
+
+        min_int=$(_cc_to_int "${SD_MIN_COMPUTE_CAP}")
+        [ "${SD_GPU_MIN_CC_INT}" -lt "$min_int" ] && continue
+
+        if [ "${SD_MAX_COMPUTE_CAP}" != "none" ]; then
+            max_int=$(_cc_to_int "${SD_MAX_COMPUTE_CAP}")
+            [ "${SD_GPU_MIN_CC_INT}" -gt "$max_int" ] && continue
+        fi
+
+        [ "${SD_DRIVER_MAJOR}" -lt "${SD_MIN_DRIVER}" ] && continue
+
+        echo "Selected profile: ${profile}"
+        _report_cuda_profile
+        return 0
+    done
+
+    # 4. Nothing matched. Two very different reasons, so handle them separately.
+
+    # 4a. The GPU is too NEW for the fallback: Blackwell on a pre-580 driver is
+    #     too new for cu126 (no sm_120 kernels) and too old for cu130. cu126
+    #     would install a torch that cannot run a single kernel on this card, so
+    #     take the least-demanding CUDA 13 profile and say why.
+    cuda_profile_config "${SD_CUDA_PROFILE_FALLBACK}"
+    local fallback_max_int
+    fallback_max_int=$(_cc_to_int "${SD_MAX_COMPUTE_CAP}")
+
+    if [ "${SD_MAX_COMPUTE_CAP}" != "none" ] && [ "${SD_GPU_MIN_CC_INT}" -gt "$fallback_max_int" ]; then
+        local candidate="" candidate_driver=""
+        for profile in ${SD_CUDA_PROFILES}; do
+            cuda_profile_config "$profile" || continue
+            # SD_CUDA_PROFILES is ordered newest-first, so the LAST CUDA 13
+            # profile seen is the one with the lowest driver requirement.
+            if [ "${SD_CUDA_MAJOR}" = "13" ]; then
+                candidate="$profile"
+                candidate_driver="${SD_MIN_DRIVER}"
+            fi
+        done
+        cuda_profile_config "${candidate:-${SD_CUDA_PROFILE_FALLBACK}}"
+        echo "WARNING: compute capability ${SD_GPU_MIN_CC} needs CUDA 13, which requires"
+        echo "WARNING: driver ${candidate_driver} or newer -- this host reports ${SD_DRIVER_MAJOR}.x."
+        echo "WARNING: using ${SD_CUDA_PROFILE} anyway. UPDATE YOUR NVIDIA DRIVER."
+        _report_cuda_profile
+        return 0
+    fi
+
+    # 4b. Otherwise the driver is just too old (or unreadable) for any profile
+    #     the GPU would otherwise qualify for. The fallback genuinely supports
+    #     this card, so use it -- this is a warning, not a problem.
+    echo "WARNING: driver ${SD_DRIVER_MAJOR}.x is below every profile's minimum, or could not be read."
+    echo "WARNING: using ${SD_CUDA_PROFILE}, which supports compute capability ${SD_GPU_MIN_CC}."
+    _report_cuda_profile
+    return 0
+}
+
+_report_cuda_profile() {
+    # Point wheel consumers at the matching per-profile directory, falling back
+    # to a flat /wheels for images built before the split.
+    if [ -d "/wheels/${SD_CUDA_PROFILE}" ]; then
+        export SD_WHEELS_DIR="/wheels/${SD_CUDA_PROFILE}"
+    elif [ -d /wheels ]; then
+        export SD_WHEELS_DIR="/wheels"
+    else
+        export SD_WHEELS_DIR=""
+    fi
+
+    # Point runtime extension builds at the nvcc whose CUDA MAJOR matches this
+    # profile's torch. Getting this wrong is the classic "The detected CUDA
+    # version mismatches the version that was used to compile PyTorch" failure.
+    if [ -n "${SD_CUDA_HOME}" ] && [ -d "${SD_CUDA_HOME}" ]; then
+        export CUDA_HOME="${SD_CUDA_HOME}"
+        export CUDA_PATH="${SD_CUDA_HOME}"
+        export PATH="${SD_CUDA_HOME}/bin:${PATH}"
+    fi
+
+    echo "  torch index : ${TORCH_INDEX_URL}"
+    echo "  torch spec  : ${SD_TORCH_SPEC}"
+    echo "  arch list   : ${TORCH_CUDA_ARCH_LIST}"
+    echo "  wheels dir  : ${SD_WHEELS_DIR:-<none>}"
+    echo "  cuda home   : ${CUDA_HOME:-<system default>}"
+    echo -e "-------------------------------------\n"
+}
+
+# Installs the profile's torch/torchvision into the active env.
+#
+# Call this BEFORE a UI's own `pip install -r requirements.txt`. Most UIs list a
+# bare unpinned `torch`, which resolves to the PyPI default -- currently a CUDA
+# 13 build that silently excludes every pre-Turing GPU. Installing the pinned
+# pair first means the later requirements.txt sees torch as already satisfied.
+#
+# Extra arguments are passed through to pip (e.g. --no-cache-dir).
+install_torch() {
+    if [ -z "${TORCH_INDEX_URL}" ]; then
+        echo "install_torch: no CUDA profile selected, skipping explicit torch install."
+        return 1
+    fi
+    echo "Installing ${SD_TORCH_SPEC} from ${TORCH_INDEX_URL}"
+    # --index-url, not --extra-index-url: the pytorch index must WIN over PyPI,
+    # otherwise pip is free to pick the PyPI default build of the same version.
+    pip install "$@" ${SD_TORCH_SPEC} --index-url "${TORCH_INDEX_URL}"
+}
+
+# Exports TORCH_COMMAND for the UIs that install torch from their OWN launcher
+# rather than from a requirements.txt we control (A1111, Forge, SD.Next, Fooocus,
+# kohya_ss). All of them read TORCH_COMMAND and run it verbatim, and several
+# build their own venv, so install_torch into the conda env would not reach them.
+#
+# Without this they fall back to their built-in default, which for every one of
+# them is now a CUDA 13 index -- unusable on Pascal and below.
+export_torch_command() {
+    if [ -z "${TORCH_INDEX_URL}" ]; then
+        echo "export_torch_command: no CUDA profile selected, leaving TORCH_COMMAND alone."
+        return 1
+    fi
+    export TORCH_COMMAND="pip install ${SD_TORCH_SPEC} --index-url ${TORCH_INDEX_URL}"
+    export TORCH_INDEX_URL
+    echo "TORCH_COMMAND=${TORCH_COMMAND}"
+}
+
+# Prepends every NVIDIA pip-package lib directory in the ACTIVE env to
+# LD_LIBRARY_PATH.
+#
+# Scripts used to hardcode one path, e.g.
+#   .../site-packages/nvidia/cuda_nvrtc/lib
+# but the layout is not stable: CUDA 12 wheels use one directory per component
+# (nvidia/cuda_nvrtc/lib, nvidia/cublas/lib, ...), while the CUDA 13 wheels ship
+# a consolidated nvidia/cu13/lib. A hardcoded path silently becomes a no-op on
+# the other profile. Globbing whatever is actually installed works for both.
+export_nvidia_lib_path() {
+    local site_packages dir found=""
+    site_packages=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null) || return 0
+    [ -d "${site_packages}/nvidia" ] || return 0
+
+    while IFS= read -r dir; do
+        [ -d "$dir" ] || continue
+        case ":${LD_LIBRARY_PATH}:" in *":${dir}:"*) continue ;; esac
+        found="${dir}${found:+:}${found}"
+    done < <(find "${site_packages}/nvidia" -maxdepth 2 -type d -name lib 2>/dev/null | sort)
+
+    if [ -n "$found" ]; then
+        export LD_LIBRARY_PATH="${found}${LD_LIBRARY_PATH:+:}${LD_LIBRARY_PATH}"
+        echo "Added NVIDIA runtime libs to LD_LIBRARY_PATH: ${found}"
+    fi
+}
+
+# Installs every prebuilt wheel that matches the active profile, if any exist.
+# A missing wheel is not fatal -- it only means the package is unavailable or
+# has to be installed from source by the UI itself.
+install_profile_wheels() {
+    if [ -z "${SD_WHEELS_DIR}" ] || ! compgen -G "${SD_WHEELS_DIR}/*.whl" >/dev/null; then
+        echo "No prebuilt wheels for profile ${SD_CUDA_PROFILE:-<none>}, skipping."
+        return 0
+    fi
+    echo "Installing prebuilt wheels from ${SD_WHEELS_DIR}"
+    # --no-deps: these wheels declare a bare `torch` requirement, and without
+    # this pip happily REPLACES the profile-matched torch we just installed.
+    pip install --no-deps "${SD_WHEELS_DIR}"/*.whl
+}
+
 #Function to move folder and replace with symlink
 sl_folder()     {
   echo "moving folder ${1}/${2} to ${3}/${4}"
@@ -218,3 +488,14 @@ install_requirements() {
         fi
     done
 }
+# -----------------------------------------------------------------------------
+# Run the profile selection once, at source time.
+#
+# Every NN.sh sources this file at line 2, so doing it here means the profile
+# variables are available to all of them without touching each script's header.
+# The guard keeps it to a single nvidia-smi call per container start.
+# -----------------------------------------------------------------------------
+if [ -z "${SD_CUDA_PROFILE_RESOLVED}" ]; then
+    detect_cuda_profile || true
+    export SD_CUDA_PROFILE_RESOLVED=1
+fi

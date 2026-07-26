@@ -1,0 +1,16 @@
+# Assembles one profile's wheel artifacts into a `FROM scratch` image.
+#
+# Used only by .github/workflows/build-wheels.yml, after the per-package matrix
+# jobs have each uploaded their wheels. Nothing is compiled here -- the build
+# context is just a directory of .whl files.
+FROM scratch
+
+ARG SD_CUDA_PROFILE=cu130
+ARG SD_TORCH_VERSION=2.13.0
+
+LABEL org.opencontainers.image.title="stable-diffusion prebuilt CUDA wheels"
+LABEL org.opencontainers.image.description="Artifact image (FROM scratch). Contains only /wheels for one CUDA profile."
+LABEL sd.cuda.profile="${SD_CUDA_PROFILE}"
+LABEL sd.torch.version="${SD_TORCH_VERSION}"
+
+COPY wheels/ /wheels/

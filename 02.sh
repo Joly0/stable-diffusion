@@ -64,6 +64,10 @@ sl_folder ${SD02_DIR}/webui outputs ${BASE_DIR}/outputs 02-sd-webui
 # Force the use of the Conda environment's Python executable
 export python_cmd="$(which python)"
 
+# webui.sh/launch.py installs torch itself; point it at this machine's profile
+# index instead of its built-in default (currently a CUDA 13 build).
+export_torch_command
+
 # Launch Stable-Diffusion-WebUI
 echo "Run Stable-Diffusion-WebUI"
 cd ${SD02_DIR}/webui

@@ -48,8 +48,10 @@ conda install -c conda-forge python=3.11 pip git nodejs --solver=libmamba -y
 
 # Install Python requirements
 pip install --upgrade pip
-# As per instructions, install torch first with specific CUDA version
-pip install --no-cache-dir torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu126
+# As per ai-toolkit's instructions, install torch first. The version and index
+# now come from the CUDA profile selected for this machine rather than being
+# hardcoded, so old and new GPUs each get a torch that runs on them.
+install_torch --no-cache-dir
 # Install the project's requirements
 cd ${SD73_DIR}/ai-toolkit/
 pip install -r requirements.txt

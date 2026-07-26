@@ -40,9 +40,13 @@ source activate ${SD72_DIR}/OneTrainer/conda_env
 conda install -n base conda-libmamba-solver -y
 conda install -c conda-forge python=3.10 pip --solver=libmamba -y
 
-# Install OneTrainer's Python requirements
+# Install OneTrainer's Python requirements.
+# Its requirements.txt pins a torch of its own; installing the profile-matched
+# one first keeps old GPUs on a CUDA 12 build.
 pip install --upgrade pip
+export_torch_command
 cd ${SD72_DIR}/OneTrainer/
+install_torch
 pip install -r requirements.txt
 
 # Install custom user requirements if specified

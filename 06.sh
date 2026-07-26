@@ -57,6 +57,9 @@ sl_folder ${SD06_DIR}/Fooocus outputs ${BASE_DIR}/outputs 06-Fooocus
 
 # Install Fooocus's Python requirements
 cd ${SD06_DIR}/Fooocus
+# Pin torch to this machine's profile before Fooocus's launch.py resolves it.
+export_torch_command
+install_torch
 pip install -r requirements_versions.txt
 
 # Install custom user requirements if specified

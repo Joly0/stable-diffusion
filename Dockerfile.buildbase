@@ -1,73 +1,337 @@
-# --- Builder Stage ---
-FROM nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04 AS builder
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# Wheel builder -- produces ONE profile's worth of prebuilt CUDA wheels.
+#
+# The result is an ARTIFACT image, not a runnable one: the final stage is
+# `FROM scratch` and contains nothing but /wheels. It is ~200 MB instead of the
+# ~2 GB it used to be, and it shares no layers with the runtime image, so the
+# two can be rebuilt completely independently. The runtime Dockerfile consumes
+# it with `COPY --from=ghcr.io/<owner>/sd-wheels:<profile> /wheels /wheels/<profile>`.
+#
+# Build one profile:
+#   docker build -f Dockerfile.buildbase \
+#     --build-arg CUDA_IMAGE=nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04 \
+#     --build-arg SD_CUDA_PROFILE=cu130 \
+#     --build-arg SD_CUDA_MAJOR=13 \
+#     --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 \
+#     --build-arg SD_TORCH_SPEC="torch==2.13.0 torchvision==0.28.0" \
+#     --build-arg SD_TORCH_VERSION=2.13.0 \
+#     -t sd-wheels:cu130 .
+#
+# Every one of those values comes from cuda-profiles.sh. Do not invent new ones
+# here -- CI reads the same file, and drift between these wheels and the torch
+# the runtime installs is exactly the ABI mismatch this design exists to stop.
+#
+# -----------------------------------------------------------------------------
+# MEMORY: if you build inside a memory-capped buildx builder you MUST pass
+# BUILD_MEM_GB, because a RUN step reads /proc/meminfo and sees the HOST's free
+# memory, not the builder's cgroup limit. Without it the job count is sized for
+# a machine far larger than the one it is allowed to use, and nvcc gets
+# OOM-killed ("Killed" / "ResourceExhausted: cannot allocate memory").
+#
+#   docker buildx create --name limited --driver docker-container \
+#     --driver-opt memory=24g --driver-opt memory-swap=32g
+#   docker buildx use limited
+#   docker buildx build --build-arg BUILD_MEM_GB=24 --load -t sd-wheels:cu130 .
+#
+# Set BUILD_MEM_GB to the SAME number as --driver-opt memory. Leave it unset
+# only when building without a cap, where host detection is correct.
+# =============================================================================
+
+ARG CUDA_IMAGE=nvidia/cuda:13.0.3-cudnn-devel-ubuntu24.04
+
+FROM ${CUDA_IMAGE} AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
-ENV TORCH_CUDA_ARCH_LIST="8.0 8.6 8.7 8.9 9.0 9.0a 10 12"
-ENV MAX_JOBS=8
+
+# --- Profile coordinate (all of it comes from cuda-profiles.sh) ---
+ARG SD_CUDA_PROFILE=cu130
+ARG SD_CUDA_MAJOR=13
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
+ARG SD_TORCH_SPEC="torch==2.13.0 torchvision==0.28.0"
+ARG SD_TORCH_VERSION=2.13.0
+ARG PYTHON_VERSION=3.12
+ARG PYTHON_TAG=cp312
+ENV SD_CUDA_PROFILE=${SD_CUDA_PROFILE}
+
+# Which packages to build. Lets CI run one job per package so each gets its own
+# 6 h budget and they run in parallel; a local build just leaves the default.
+ARG SD_BUILD_PACKAGES="flash-attn sageattention diso nvdiffrast kaolin"
+ENV SD_BUILD_PACKAGES=${SD_BUILD_PACKAGES}
+
+ARG TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0 10.0 12.0"
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
+
+# SageAttention only ships kernels for sm80/86/89/90/120, so it gets its own
+# narrower list. Arches outside that set are ignored or error out.
+ARG SD_SAGE_ARCH_LIST="8.0 8.6 8.9 9.0 12.0"
+
+ARG SD_FLASH_ATTN_VERSION=2.8.3
+ARG SD_FLASH_ATTN_REPO=Dao-AILab/flash-attention
+
+# Memory budget in GB for sizing MAX_JOBS. Empty = detect from /proc/meminfo.
+ARG BUILD_MEM_GB=""
+ENV BUILD_MEM_GB=${BUILD_MEM_GB}
+
+# Raises the GitHub API rate limit when resolving the flash-attn release.
+ARG GITHUB_TOKEN=""
+
 WORKDIR /build
 
-# --- Dépendances système ---
-RUN apt-get update && apt-get install -y -q=2 \
-    build-essential wget curl git cmake gnupg bc rsync ffmpeg ninja-build \
+# --- System dependencies ---
+# NOTE: cuda-toolkit-XX-Y is deliberately NOT installed here. The -devel base
+# image already provides nvcc, CUDA headers, dev/static libs, cccl and cuDNN
+# dev. Pulling the metapackage re-resolves the CUDA tree against the live
+# NVIDIA repo, whose current revisions conflict with the ones baked into the
+# image -> "E: Unable to correct problems, you have held broken packages."
+#
+# Verbosity is left at apt's default on purpose: -q=2 hides the "unmet
+# dependencies" block and leaves you with only the final E: line.
+RUN apt-get update && apt-get install -y \
+    build-essential wget curl git cmake gnupg bc rsync ffmpeg ninja-build ccache \
     libxft2 xvfb \
-    python3.12 python3.12-dev python3.12-venv python3-setuptools \
-    cuda-toolkit-12-8 \
- && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 \
- && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 \
- && update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 \
+    python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv python3-setuptools \
+ && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+ && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+ && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 
-# Ajouter CUDA dans le PATH (au cas où)
-ENV PATH="/usr/local/cuda/bin:$PATH"
+ENV PATH="/usr/local/cuda/bin:/usr/lib/ccache:$PATH"
 ENV CPLUS_INCLUDE_PATH="/usr/local/cuda/include"
 
-# --- Paquets Python ---
-RUN python3.12 -m pip install --no-cache-dir wheel packaging \
- && python3.12 -m pip install --no-cache-dir torch==2.7.1 torchvision torchaudio \
-      --extra-index-url https://download.pytorch.org/whl/cu128 \
- && python3.12 -m pip install --no-cache-dir cython==0.29.37
+# ccache fronts both the host compiler and nvcc. On a one-line change this turns
+# a multi-hour rebuild into minutes; CI persists /ccache via a BuildKit cache
+# mount so the saving carries across runs, not just across layers.
+ENV CCACHE_DIR=/ccache
+ENV CMAKE_C_COMPILER_LAUNCHER=ccache
+ENV CMAKE_CXX_COMPILER_LAUNCHER=ccache
+ENV CMAKE_CUDA_COMPILER_LAUNCHER=ccache
 
-# --- Compilation des wheels ---
+# --- Auto MAX_JOBS helper ---
+# Prints MAX_JOBS = min(nproc, budget_GB / (GB_per_thread * NVCC_THREADS)).
+#
+# The NVCC_THREADS factor matters: nvcc --threads N compiles N arch targets
+# concurrently INSIDE one process, so real concurrency is MAX_JOBS * threads.
+# Ignoring it is how 7 jobs became ~28 parallel compilations and OOMed.
+#
+# Budget source, in order: $BUILD_MEM_GB -> cgroup limit -> /proc/meminfo.
+# Usage: max-jobs [GB_per_thread]   (default 5)
+RUN cat > /usr/local/bin/max-jobs <<'EOF' && chmod +x /usr/local/bin/max-jobs
+#!/usr/bin/env bash
+set -euo pipefail
+per_thread_gb="${1:-5}"
+threads="${NVCC_THREADS:-1}"
+src="proc-meminfo"
 
-# flash-attention
-RUN git clone https://github.com/Dao-AILab/flash-attention --recurse-submodules \
- && cd flash-attention \
- && python3.12 setup.py bdist_wheel \
- && cp dist/*.whl /build/
+mem_kb=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
 
-# diso
-RUN git clone https://github.com/SarahWeiii/diso --recurse-submodules \
- && cd diso \
- && python3.12 setup.py bdist_wheel \
- && cp dist/*.whl /build/
+# an explicit cgroup limit, if this step can actually see one
+for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+  if [[ -r "$f" ]]; then
+    v=$(cat "$f")
+    if [[ "$v" != "max" && "$v" =~ ^[0-9]+$ ]]; then
+      cg_kb=$(( v / 1024 ))
+      if (( cg_kb > 0 && cg_kb < mem_kb )); then mem_kb=$cg_kb; src="cgroup"; fi
+    fi
+  fi
+done
 
-# nvdiffrast
-RUN git clone https://github.com/NVlabs/nvdiffrast.git \
- && cd nvdiffrast \
- && python3.12 setup.py bdist_wheel \
- && cp dist/*.whl /build/
+# explicit override wins: the only reliable source inside a capped builder
+if [[ -n "${BUILD_MEM_GB:-}" ]]; then
+  mem_kb=$(( BUILD_MEM_GB * 1024 * 1024 ))
+  src="BUILD_MEM_GB"
+fi
 
-# kaolin
-RUN git clone https://github.com/HarrisonPrism/kaolin_5090.git \
- && cd kaolin_5090 \
- && python3.12 setup.py bdist_wheel \
- && cp dist/*.whl /build/
+per_job_gb=$(( per_thread_gb * threads ))
+by_mem=$(( mem_kb / 1024 / 1024 / per_job_gb ))
+by_cpu=$(nproc)
+jobs=$(( by_mem < by_cpu ? by_mem : by_cpu ))
+(( jobs < 1 )) && jobs=1
+
+# diagnostics to stderr so they show in the log without polluting $(...)
+echo "max-jobs: budget=$(( mem_kb / 1024 / 1024 ))GB (src=${src}) " \
+     "per_job=${per_job_gb}GB (${per_thread_gb}x${threads} threads) " \
+     "by_mem=${by_mem} by_cpu=${by_cpu} -> ${jobs}" >&2
+echo "$jobs"
+EOF
+
+# Tiny helper so each build step can opt out when CI narrowed SD_BUILD_PACKAGES.
+RUN cat > /usr/local/bin/want-pkg <<'EOF' && chmod +x /usr/local/bin/want-pkg
+#!/usr/bin/env bash
+# want-pkg <name> -> 0 if <name> is listed in $SD_BUILD_PACKAGES
+[[ " ${SD_BUILD_PACKAGES:-} " == *" ${1} "* ]]
+EOF
+
+# --- Python packages ---
+# --index-url, not --extra-index-url: the pytorch index must WIN over PyPI.
+# With --extra-index-url pip is free to pick PyPI's default build of the same
+# version, which is a different CUDA variant and silently breaks the profile.
+RUN python${PYTHON_VERSION} -m pip install --no-cache-dir wheel packaging setuptools \
+ && python${PYTHON_VERSION} -m pip install --no-cache-dir ${SD_TORCH_SPEC} \
+      --index-url ${TORCH_INDEX_URL} \
+ && python${PYTHON_VERSION} -m pip install --no-cache-dir cython==0.29.37
+
+# --- Preflight: fail in seconds, not 40 minutes ---
+# Verifies nvcc and torch agree on the CUDA major version before any wheel
+# build, and that torch is the variant this profile actually asked for.
+RUN python${PYTHON_VERSION} - <<'EOF'
+import os, re, subprocess, sys
+import torch
+
+out = subprocess.check_output(["nvcc", "--version"], text=True)
+m = re.search(r"release (\d+)\.(\d+)", out)
+if not m:
+    sys.exit("FATAL: could not parse nvcc version output")
+tk_major, tk_minor = int(m.group(1)), int(m.group(2))
+
+if torch.version.cuda is None:
+    sys.exit("FATAL: installed torch is a CPU-only build (torch.version.cuda is None)")
+tv_major, tv_minor = (int(x) for x in torch.version.cuda.split(".")[:2])
+
+profile = os.environ.get("SD_CUDA_PROFILE", "?")
+print(f"profile {profile} | toolkit nvcc CUDA {tk_major}.{tk_minor} | "
+      f"torch {torch.__version__} built against CUDA {tv_major}.{tv_minor}")
+
+if tk_major != tv_major:
+    sys.exit(
+        f"FATAL: CUDA major mismatch (toolkit {tk_major}.{tk_minor} vs torch "
+        f"{tv_major}.{tv_minor}). Every extension build would fail.\n"
+        "Fix by matching CUDA_IMAGE to the profile's TORCH_INDEX_URL -- both "
+        "come from cuda-profiles.sh, so they should never disagree."
+    )
+if tk_minor != tv_minor:
+    print(f"WARNING: CUDA minor mismatch ({tk_major}.{tk_minor} vs "
+          f"{tv_major}.{tv_minor}). Usually fine.")
+
+# The local version tag ("+cu130") is the only proof the right index was used.
+# Without this check a pip fallback to PyPI produces wheels for the wrong CUDA
+# variant that look completely fine until they are imported on a user's GPU.
+if profile and profile != "?" and "+" in torch.__version__:
+    got = torch.__version__.split("+", 1)[1]
+    if got != profile:
+        sys.exit(f"FATAL: got torch build '+{got}' but profile is '{profile}'. "
+                 "pip resolved against the wrong index.")
+EOF
+
+# =============================================================================
+# Wheel builds
+#
+# Each package is its own layer, so a failure or a cache miss only costs that
+# one package. Steps skip themselves when SD_BUILD_PACKAGES excludes them, which
+# is how the CI matrix runs one package per job.
+# =============================================================================
+
+# --- flash-attention: DOWNLOADED, not compiled ---
+# This used to be the single most expensive step in the repo (~96 CUDA files x
+# several arch targets, hours of wall time, the usual OOM culprit). Dao-AILab
+# publishes ~50 prebuilt assets per release; see scripts/fetch-flash-attn.sh for
+# why a matching asset is a safe substitute and why a miss is not fatal.
+COPY scripts/fetch-flash-attn.sh /usr/local/bin/fetch-flash-attn
+RUN chmod +x /usr/local/bin/fetch-flash-attn \
+ && if want-pkg flash-attn; then \
+      SD_FLASH_ATTN_VERSION="${SD_FLASH_ATTN_VERSION}" \
+      SD_FLASH_ATTN_REPO="${SD_FLASH_ATTN_REPO}" \
+      SD_CUDA_MAJOR="${SD_CUDA_MAJOR}" \
+      SD_TORCH_VERSION="${SD_TORCH_VERSION}" \
+      PYTHON_TAG="${PYTHON_TAG}" \
+      GITHUB_TOKEN="${GITHUB_TOKEN}" \
+      fetch-flash-attn /build; \
+    else echo "skip flash-attn"; fi
+
+# --- SageAttention 2 / 2++ ---
+# The reason this builder still exists at all: PyPI only carries sageattention
+# 1.0.6 (Triton, no compiled kernels), while v2/v2++ is source-only. It is also
+# the better attention backend for diffusion, which is what makes dropping the
+# flash-attn compile above an easy trade.
+#
+# setup.py falls back to TORCH_CUDA_ARCH_LIST when no GPU is present, so it
+# builds fine headless. NVCC_THREADS=1 for the reason in the max-jobs comment.
+RUN --mount=type=cache,target=/ccache,sharing=locked \
+    if want-pkg sageattention; then \
+      git clone --depth 1 https://github.com/thu-ml/SageAttention.git --recurse-submodules \
+      && cd SageAttention \
+      && export NVCC_THREADS=1 \
+      && TORCH_CUDA_ARCH_LIST="${SD_SAGE_ARCH_LIST}" \
+         NVCC_APPEND_FLAGS="--threads 1" \
+         MAX_JOBS=$(max-jobs 5) python${PYTHON_VERSION} setup.py bdist_wheel \
+      && cp dist/*.whl /build/ \
+      && cd /build && rm -rf SageAttention; \
+    else echo "skip sageattention"; fi
+
+# --- diso (~2 GB/job) ---
+RUN --mount=type=cache,target=/ccache,sharing=locked \
+    if want-pkg diso; then \
+      git clone --depth 1 https://github.com/SarahWeiii/diso --recurse-submodules \
+      && cd diso \
+      && MAX_JOBS=$(max-jobs 2) python${PYTHON_VERSION} setup.py bdist_wheel \
+      && cp dist/*.whl /build/ \
+      && cd /build && rm -rf diso; \
+    else echo "skip diso"; fi
+
+# --- nvdiffrast (~2 GB/job) ---
+RUN --mount=type=cache,target=/ccache,sharing=locked \
+    if want-pkg nvdiffrast; then \
+      git clone --depth 1 https://github.com/NVlabs/nvdiffrast.git \
+      && cd nvdiffrast \
+      && MAX_JOBS=$(max-jobs 2) python${PYTHON_VERSION} setup.py bdist_wheel \
+      && cp dist/*.whl /build/ \
+      && cd /build && rm -rf nvdiffrast; \
+    else echo "skip nvdiffrast"; fi
+
+# --- kaolin (~2 GB/job) ---
+RUN --mount=type=cache,target=/ccache,sharing=locked \
+    if want-pkg kaolin; then \
+      git clone --depth 1 https://github.com/HarrisonPrism/kaolin_5090.git \
+      && cd kaolin_5090 \
+      && MAX_JOBS=$(max-jobs 2) python${PYTHON_VERSION} setup.py bdist_wheel \
+      && cp dist/*.whl /build/ \
+      && cd /build && rm -rf kaolin_5090; \
+    else echo "skip kaolin"; fi
 
 # mip-splatting / diff-gaussian-rasterization
 #RUN git clone https://github.com/autonomousvision/mip-splatting --recurse-submodules \
 # && cd mip-splatting/submodules/diff-gaussian-rasterization \
-# && python3.12 setup.py bdist_wheel \
+# && MAX_JOBS=$(max-jobs 2) python${PYTHON_VERSION} setup.py bdist_wheel \
 # && cp dist/*.whl /build/
 
 # vox2seq / TRELLIS
 #RUN git clone https://github.com/microsoft/TRELLIS --recurse-submodules \
 # && cd TRELLIS/extensions/vox2seq \
-# && python3.12 setup.py bdist_wheel \
+# && MAX_JOBS=$(max-jobs 2) python${PYTHON_VERSION} setup.py bdist_wheel \
 # && cp dist/*.whl /build/
 
-# --- Final Stage ---
-FROM ghcr.io/linuxserver/baseimage-kasmvnc:ubuntunoble
+# Collect into one clean directory and record what this image actually contains,
+# so a runtime ABI mismatch can be diagnosed from the image alone.
+RUN mkdir -p /wheels && (cp /build/*.whl /wheels/ 2>/dev/null || true) \
+ && { echo "profile=${SD_CUDA_PROFILE}"; \
+      echo "cuda_major=${SD_CUDA_MAJOR}"; \
+      echo "torch=${SD_TORCH_VERSION}"; \
+      echo "torch_index=${TORCH_INDEX_URL}"; \
+      echo "python_tag=${PYTHON_TAG}"; \
+      echo "arch_list=${TORCH_CUDA_ARCH_LIST}"; \
+      echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+      echo "wheels:"; ls -1 /wheels 2>/dev/null | grep -v MANIFEST | sed 's/^/  /'; \
+    } > /wheels/MANIFEST.txt \
+ && cat /wheels/MANIFEST.txt
 
-COPY --from=builder /build/*.whl /wheels/
+# =============================================================================
+# Final stage -- ARTIFACT ONLY.
+#
+# `FROM scratch` is the whole point of this file. The image holds /wheels and
+# nothing else: no OS, no CUDA, no kasmvnc. It cannot be run, only COPY --from'd.
+# That is what decouples the wheel build from the runtime image -- rebuilding
+# the runtime image no longer drags a multi-GB base along, and rebuilding wheels
+# no longer invalidates the runtime image.
+# =============================================================================
+FROM scratch
+
+ARG SD_CUDA_PROFILE=cu130
+ARG SD_TORCH_VERSION=2.13.0
+LABEL org.opencontainers.image.title="stable-diffusion prebuilt CUDA wheels"
+LABEL org.opencontainers.image.description="Artifact image (FROM scratch). Contains only /wheels for one CUDA profile."
+LABEL sd.cuda.profile="${SD_CUDA_PROFILE}"
+LABEL sd.torch.version="${SD_TORCH_VERSION}"
+
+COPY --from=builder /wheels /wheels

@@ -1,4 +1,51 @@
-FROM ghcr.io/grokuku/stable-diffusion-buildbase:latest
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# Runtime image.
+#
+# This no longer builds FROM the buildbase. The buildbase is now a `FROM scratch`
+# artifact image containing only /wheels (see Dockerfile.buildbase), and it is
+# pulled in with COPY --from below. Consequences:
+#
+#   - Rebuilding this image no longer drags a multi-GB compile base along.
+#   - Rebuilding the wheels no longer invalidates this image's layers.
+#   - One runtime image carries the wheels for EVERY CUDA profile and picks the
+#     matching set at container start (see detect_cuda_profile in functions.sh).
+#
+# -----------------------------------------------------------------------------
+# WHERE THE WHEELS COME FROM
+#
+# The default is the UPSTREAM namespace, so a plain `docker build` in a clean
+# checkout uses upstream's published wheels and no fork is baked into the file.
+#
+# Forks do not need to edit this. The publish workflow detects that it is running
+# in a fork, and if that fork has published its own wheels images it passes them
+# in via WHEELS_IMAGE automatically -- otherwise it falls back to upstream. So a
+# fork gets its own wheels as soon as it runs the build-wheels workflow once, and
+# keeps working before that.
+#
+# To point a manual build at your own wheels, one arg switches all three:
+#   docker build --build-arg WHEELS_IMAGE=ghcr.io/<you>/sd-wheels .
+#
+# Or override a single profile, e.g. to test a locally built one:
+#   docker build --build-arg WHEELS_CU130=sd-wheels:cu130-test .
+# =============================================================================
+
+ARG BASE_IMAGE=ghcr.io/linuxserver/baseimage-kasmvnc:ubuntunoble
+
+# Repository holding the per-profile wheel artifact images.
+ARG WHEELS_IMAGE=ghcr.io/grokuku/sd-wheels
+
+# Per-profile wheel artifact images. Tags encode the coordinate that invalidates
+# them, so a torch bump means a new tag rather than a silent ABI mismatch.
+ARG WHEELS_CU126=${WHEELS_IMAGE}:cu126
+ARG WHEELS_CU130=${WHEELS_IMAGE}:cu130
+ARG WHEELS_CU132=${WHEELS_IMAGE}:cu132
+
+FROM ${WHEELS_CU126} AS wheels-cu126
+FROM ${WHEELS_CU130} AS wheels-cu130
+FROM ${WHEELS_CU132} AS wheels-cu132
+
+FROM ${BASE_IMAGE}
 
 # Copy s6-overlay and custom service configuration
 COPY docker/root/ /
@@ -11,10 +58,14 @@ ENV BASE_DIR=/config \
     SD_INSTALL_DIR=/opt/sd-install \
     XDG_CACHE_HOME=/config/temp
 
-# Set compiler and Torch/CUDA architecture for any potential runtime compilations
+# Set compiler for any potential runtime compilations.
+#
+# TORCH_CUDA_ARCH_LIST is deliberately NOT set here any more. It is per-profile
+# now and gets exported at container start by detect_cuda_profile(); a build-time
+# value would be wrong for two of the three profiles and would silently override
+# the correct one.
 ENV CC=/usr/bin/gcc-13
 ENV CXX=/usr/bin/g++-13
-ENV TORCH_CUDA_ARCH_LIST="8.0 8.6 8.7 8.9 9.0 9.0a 10 12"
 
 # --- System & Package Installation ---
 RUN apt-get update -q && \
@@ -46,11 +97,29 @@ RUN apt-get update -q && \
     dpkg -i packages-microsoft-prod.deb && \
     rm packages-microsoft-prod.deb && \
     apt-get update && \
-    apt-get -y install cuda-toolkit-12-8 dotnet-sdk-8.0 && \
+    # The CUDA 13 toolkit serves the cu130 and cu132 profiles. nvcc only has to
+    # agree with torch on the CUDA MAJOR version -- a minor difference (13.0
+    # toolkit vs a cu132 torch) is a warning, not an error.
+    apt-get -y install cuda-toolkit-13-0 dotnet-sdk-8.0 && \
+    # ...plus a minimal CUDA 12 compiler set for the cu126 profile. Without it a
+    # Pascal / old-driver user who triggers a runtime extension build (some
+    # ComfyUI custom nodes compile on install) hits "The detected CUDA version
+    # (13.0) mismatches the version that was used to compile PyTorch (12.6)".
+    # This is nvcc + headers only, not another full ~7 GB toolkit.
+    apt-get -y install cuda-nvcc-12-6 cuda-cudart-dev-12-6 cuda-cccl-12-6 && \
     # Clean up package cache
     apt autoremove -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# --- Prebuilt CUDA wheels, one directory per profile ---
+# functions.sh:_report_cuda_profile points SD_WHEELS_DIR at the matching one.
+# Installing the wrong set is not a subtle failure: these are compiled C++
+# extensions linked against one specific libtorch, so a mismatch is an
+# ImportError at best and a segfault at worst.
+COPY --from=wheels-cu126 /wheels /wheels/cu126
+COPY --from=wheels-cu130 /wheels /wheels/cu130
+COPY --from=wheels-cu132 /wheels /wheels/cu132
 
 # --- Application Setup ---
 # Create application directories
@@ -61,7 +130,8 @@ ADD parameters/* ${SD_INSTALL_DIR}/parameters/
 
 RUN mkdir -p /root/defaults
 
-# Copy and set permissions for all launch scripts
+# Copy and set permissions for all launch scripts.
+# This glob also picks up cuda-profiles.sh, which functions.sh sources from /.
 COPY --chown=abc:abc *.sh ./
 RUN chmod +x /entry.sh
 

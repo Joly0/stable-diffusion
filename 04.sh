@@ -71,6 +71,11 @@ sl_folder ${SD04_DIR}/webui outputs ${BASE_DIR}/outputs 04-SD-Next
 
 cd ${SD04_DIR}/webui/
 
+# SD-Next installs torch into its own venv from its own installer. Only
+# TORCH_COMMAND reaches that venv -- anything installed into the conda env above
+# is invisible to it.
+export_torch_command
+
 # Launch SD-Next WebUI
 CMD="bash webui.sh"
 while IFS= read -r param; do

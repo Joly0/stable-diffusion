@@ -35,6 +35,7 @@ fi
 
 # Install FaceFusion's Python requirements
 cd ${SD51_DIR}/facefusion 
+install_torch
 pip install -r requirements.txt
 python3 install.py --onnxruntime cuda
  

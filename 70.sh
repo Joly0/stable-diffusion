@@ -36,8 +36,11 @@ source activate ${SD70_DIR}/env
 conda install -n base conda-libmamba-solver -y
 conda install -c conda-forge python=3.10 pip --solver=libmamba -y
 
-# Install Kohya's Python requirements using its setup script
+# Install Kohya's Python requirements using its setup script.
+# setup_linux.py picks a torch itself; TORCH_COMMAND overrides that choice with
+# the profile matching this machine's GPU and driver.
 pip install --upgrade pip
+export_torch_command
 cd ${SD70_DIR}/kohya_ss
 python ./setup/setup_linux.py
 cd ${SD70_DIR}/kohya_ss

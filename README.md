@@ -134,6 +134,80 @@ This applies to the launching project only.
 If something went wrong and you can't access certain files, you can reset access rights by deleting the file named 'Delete_this_file_to_reset_access_rights_at_next_launch' in the root folder.   
 This applies to all the /config folder.   
 
+#### CUDA profiles (GPU compatibility)
+
+One image serves every NVIDIA GPU. At container start the launch scripts read the
+lowest compute capability across your GPUs plus your driver version, and select a
+**CUDA profile**; each UI then installs a torch built for that profile. This costs
+nothing extra — every UI already downloaded torch on first launch, it just comes
+from a different index now.
+
+| Profile | GPUs | Min driver | torch build |
+|---------|------|-----------|-------------|
+| `cu126` | Maxwell → Hopper (GTX 750 … GTX 10xx, RTX 20/30/40xx, A100, H100) | 525 | `+cu126` |
+| `cu130` | Turing → Blackwell (RTX 20xx … RTX 50xx) | 580 | `+cu130` |
+| `cu132` | Turing → Blackwell, newest CUDA | 595 | `+cu132` |
+
+Why more than one: CUDA 13 dropped Maxwell, Pascal and Volta outright, and PyTorch
+dropped them from every build newer than `cu126`. So `cu126` is the only remaining
+torch with GTX 10xx kernels — and it has no Blackwell kernels, so RTX 50xx needs
+`cu13x`. The **same torch release** is published on all three indexes, so an old
+card does not mean an old torch. Only the CUDA runtime differs.
+
+Notes:
+- On a multi-GPU machine the **weakest** card decides, since all UIs share one
+  torch install per environment.
+- A Blackwell card on a pre-580 driver is warned about and pushed to `cu130`
+  anyway — `cu126` has no kernels that card can run. Update your driver.
+- No GPU visible falls back to `cu126`.
+
+Override the autodetect if you need to:
+
+```
+docker run -e SD_CUDA_PROFILE=cu126 ...
+```
+
+The startup log prints the selected profile, the index URL and the reason. Profile
+definitions live in [`cuda-profiles.sh`](/cuda-profiles.sh) — it is the single
+source of truth shared by the runtime scripts and CI.
+
+#### Building the images
+
+Two independent images:
+
+- **`Dockerfile.buildbase`** produces prebuilt CUDA wheels (SageAttention 2/2++,
+  diso, nvdiffrast, kaolin) for one profile. Its final stage is `FROM scratch`, so
+  the result is a ~200 MB artifact holding only `/wheels` — it cannot be run, only
+  `COPY --from`'d. flash-attention is *downloaded* rather than compiled
+  ([`scripts/fetch-flash-attn.sh`](/scripts/fetch-flash-attn.sh)).
+- **`Dockerfile`** is the runtime image. It pulls all three wheel sets in and picks
+  the matching one at start.
+
+CI ([`build-wheels.yml`](/.github/workflows/build-wheels.yml)) runs one job per
+(profile, package) on free hosted runners, so no single job has to fit every
+compile into one memory/time budget. It only triggers on `workflow_dispatch` and on
+changes to the files that actually invalidate wheels.
+
+Run the profile-selection tests with `./tests/test-cuda-profiles.sh`.
+
+##### Forks
+
+Nothing is hardcoded to a particular GitHub account. `Dockerfile` defaults to the
+upstream wheels namespace, and forks pick up their own automatically:
+
+- `build-wheels.yml` always publishes to **your** namespace
+  (`ghcr.io/<your-account>/sd-wheels`), derived from `github.repository_owner`.
+- `publishImage.yml` checks whether your namespace has a complete set of wheels
+  images. If it does, it builds against them; if not, it falls back to the
+  upstream default. So a fresh fork works straight away on upstream's wheels and
+  switches to its own the first time you run the wheels workflow.
+
+For a manual build, one argument switches all profiles:
+
+```
+docker build --build-arg WHEELS_IMAGE=ghcr.io/<you>/sd-wheels -t stable-diffusion .
+```
+
 #### A note on development
 Starting from version 4.0, this project is being developed with the assistance of Google's Gemini.
 

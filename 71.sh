@@ -52,11 +52,19 @@ conda install -c conda-forge python=3.10 pip --solver=libmamba -y
 
 # Install Python requirements for both sd-scripts and fluxgym
 pip install --upgrade pip
+
+# Install torch first, from this machine's profile index.
+#
+# This used to install a NIGHTLY build from the cu121 index, after the
+# requirements files had already pulled a stable torch -- so every launch
+# downloaded torch twice and ended on an unpinned nightly. A pinned, profile-
+# matched torch installed first is both faster and reproducible.
+install_torch
+
 cd ${SD71_DIR}/fluxgym/sd-scripts
 pip install -r requirements.txt
 cd ${SD71_DIR}/fluxgym/
 pip install -r requirements.txt
-pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu121
 
 # Install custom user requirements if specified
 if [ -f ${SD71_DIR}/requirements.txt ]; then
@@ -72,7 +80,7 @@ sl_folder ${SD71_DIR}/fluxgym/models unet ${BASE_DIR}/models unet
 sl_folder ${SD71_DIR}/fluxgym outputs ${BASE_DIR}/outputs 71-fluxgym
 
 # Launch fluxgym
-export LD_LIBRARY_PATH=${SD71_DIR}/env/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib:$LD_LIBRARY_PATH
+export_nvidia_lib_path
 export GRADIO_SERVER_NAME="0.0.0.0"
 export GRADIO_SERVER_PORT=9000
 cd ${SD71_DIR}/fluxgym/

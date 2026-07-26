@@ -37,7 +37,10 @@ cd ${SD03_DIR}
 # Install InvokeAI if it's not already installed
 if [ ! -d "${SD03_DIR}/invokeai" ]; then
     mkdir -p ${SD03_DIR}/invokeai
-    pip install "InvokeAI" --use-pep517 --extra-index-url https://download.pytorch.org/whl/cu121
+    # Pin torch to this machine's profile before InvokeAI pulls its own. The old
+    # hardcoded cu121 index no longer carries a current torch at all.
+    install_torch
+    pip install "InvokeAI" --use-pep517 --extra-index-url ${TORCH_INDEX_URL}
 fi
 
 # Update InvokeAI on every launch
