@@ -266,6 +266,25 @@ RUN chmod +x /usr/local/bin/fetch-flash-attn \
 COPY scripts/verify-wheel-arches.sh /usr/local/bin/verify-wheel-arches
 RUN chmod +x /usr/local/bin/verify-wheel-arches
 
+# EXT_PARALLEL=1 is load-bearing. SageAttention's setup.py reuses MAX_JOBS as its
+# EXTENSION-level parallelism when EXT_PARALLEL is unset:
+#     if parallel is None and 'MAX_JOBS' in os.environ:
+#         parallel = int(os.getenv('MAX_JOBS'))
+# and each of those concurrent extension threads then runs its own
+# `ninja -j MAX_JOBS`. Real concurrency is therefore MAX_JOBS squared, which is
+# the same multiplication trap documented for NVCC_THREADS above and which
+# max-jobs does not otherwise account for. Pinning it to 1 makes concurrency
+# exactly MAX_JOBS again.
+#
+# This only started failing once the arch list was fixed, but NOT because more
+# modules build simultaneously -- `parallel` is capped at MAX_JOBS either way.
+# It is because of WHAT is being built. The broken space-separated list produced
+# only _qattn_sm80 and _fused, for one architecture; the correct list produces
+# _qattn_sm80/_sm89/_sm90 plus _fused across four. The sm89 (FP8) and sm90
+# (Hopper) kernels are heavily templated and far more memory-hungry per nvcc
+# process than sm80, so peak usage per compile rose sharply even though the job
+# count did not.
+#
 # SD_SAGE_ARCH_LIST must be SEMICOLON separated. SageAttention parses it with
 # `arch_list_env.replace(",", ";").split(";")`, which never splits on spaces, so
 # a space-separated list becomes ONE bogus capability that still matches
@@ -280,7 +299,8 @@ RUN --mount=type=cache,target=/ccache,sharing=locked \
       && export NVCC_THREADS=1 \
       && TORCH_CUDA_ARCH_LIST="${SD_SAGE_ARCH_LIST}" \
          NVCC_APPEND_FLAGS="--threads 1" \
-         MAX_JOBS=$(max-jobs 5) python${PYTHON_VERSION} setup.py bdist_wheel \
+         EXT_PARALLEL=1 \
+         MAX_JOBS=$(max-jobs 6) python${PYTHON_VERSION} setup.py bdist_wheel \
       && verify-wheel-arches dist/*.whl "${SD_SAGE_ARCH_LIST}" \
       && cp dist/*.whl /build/ \
       && cd /build && rm -rf SageAttention; \
