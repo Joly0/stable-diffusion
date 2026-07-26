@@ -112,6 +112,29 @@ RUN apt-get update -q && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
+# --- openbox-session placeholder ---
+# `apt-get purge python3` above does not only remove python: openbox depends on
+# python3, so apt drags it out too and /usr/bin/openbox-session disappears with
+# it. KasmVNC's startwm.sh expects that file, and without it the session service
+# can restart-loop.
+#
+# entry.sh already tries to paper over this at runtime, but it CANNOT work:
+# docker/root/etc/s6-overlay/s6-rc.d/svc-app/run execs it via `s6-setuidgid abc`,
+# so it runs as the unprivileged `abc` user and cannot write into /usr/bin. That
+# is the source of
+#     /entry.sh: line 31: /usr/bin/openbox-session: Permission denied
+#     chmod: cannot access '/usr/bin/openbox-session': No such file or directory
+#
+# Creating it here instead fixes it at the only point where we are still root.
+# entry.sh's own check then finds the file and skips its (doomed) write.
+RUN if [ ! -e /usr/bin/openbox-session ]; then \
+      printf '#!/bin/bash\nexit 0\n' > /usr/bin/openbox-session && \
+      chmod +x /usr/bin/openbox-session && \
+      echo "created placeholder /usr/bin/openbox-session"; \
+    else \
+      echo "/usr/bin/openbox-session survived the apt purge, leaving it alone"; \
+    fi
+
 # --- Prebuilt CUDA wheels, one directory per profile ---
 # functions.sh:_report_cuda_profile points SD_WHEELS_DIR at the matching one.
 # Installing the wrong set is not a subtle failure: these are compiled C++
