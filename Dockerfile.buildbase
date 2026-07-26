@@ -14,8 +14,8 @@
 #     --build-arg SD_CUDA_PROFILE=cu130 \
 #     --build-arg SD_CUDA_MAJOR=13 \
 #     --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130 \
-#     --build-arg SD_TORCH_SPEC="torch==2.13.0 torchvision==0.28.0" \
-#     --build-arg SD_TORCH_VERSION=2.13.0 \
+#     --build-arg SD_TORCH_SPEC="torch==2.12.1 torchvision==0.27.1" \
+#     --build-arg SD_TORCH_VERSION=2.12.1 \
 #     -t sd-wheels:cu130 .
 #
 # Every one of those values comes from cuda-profiles.sh. Do not invent new ones
@@ -49,8 +49,8 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 ARG SD_CUDA_PROFILE=cu130
 ARG SD_CUDA_MAJOR=13
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu130
-ARG SD_TORCH_SPEC="torch==2.13.0 torchvision==0.28.0"
-ARG SD_TORCH_VERSION=2.13.0
+ARG SD_TORCH_SPEC="torch==2.12.1 torchvision==0.27.1"
+ARG SD_TORCH_VERSION=2.12.1
 ARG PYTHON_VERSION=3.12
 ARG PYTHON_TAG=cp312
 ENV SD_CUDA_PROFILE=${SD_CUDA_PROFILE}
@@ -281,13 +281,29 @@ RUN --mount=type=cache,target=/ccache,sharing=locked \
     else echo "skip nvdiffrast"; fi
 
 # --- kaolin (~2 GB/job) ---
+# Upstream NVIDIAGameWorks/kaolin, NOT the HarrisonPrism/kaolin_5090 fork this
+# used to build. That fork existed only to add Blackwell (sm_120) support, which
+# upstream now has natively -- its setup.py emits 10.0;10.3;12.0;12.1 by itself.
+# The fork has been stale since 2025-07 and still caps torch at 2.7.1, so it
+# hard-fails against any current torch. Upstream is actively maintained.
+#
+# kaolin's torch ceiling (currently 2.12.1) is REAL, not a cautious guess, and it
+# is why cuda-profiles.sh pins torch 2.12.1 rather than the newest release. Do
+# not "fix" a future failure here with IGNORE_TORCH_VER=1: that was tried against
+# torch 2.13.0 and the build then fails for real a minute later in
+# kaolin/csrc/ops/conversions/mise/mise.cpp with
+#     error: no matching function for call to 'zeros(...)'
+# because the at::zeros overload changed signature. The version assertion is
+# deliberately left in place so a torch bump fails in two seconds with a clear
+# message instead of deep inside nvcc.
+ARG KAOLIN_REPO=https://github.com/NVIDIAGameWorks/kaolin.git
 RUN --mount=type=cache,target=/ccache,sharing=locked \
     if want-pkg kaolin; then \
-      git clone --depth 1 https://github.com/HarrisonPrism/kaolin_5090.git \
-      && cd kaolin_5090 \
+      git clone --depth 1 --recurse-submodules ${KAOLIN_REPO} kaolin \
+      && cd kaolin \
       && MAX_JOBS=$(max-jobs 2) python${PYTHON_VERSION} setup.py bdist_wheel \
       && cp dist/*.whl /build/ \
-      && cd /build && rm -rf kaolin_5090; \
+      && cd /build && rm -rf kaolin; \
     else echo "skip kaolin"; fi
 
 # mip-splatting / diff-gaussian-rasterization
@@ -328,7 +344,7 @@ RUN mkdir -p /wheels && (cp /build/*.whl /wheels/ 2>/dev/null || true) \
 FROM scratch
 
 ARG SD_CUDA_PROFILE=cu130
-ARG SD_TORCH_VERSION=2.13.0
+ARG SD_TORCH_VERSION=2.12.1
 LABEL org.opencontainers.image.title="stable-diffusion prebuilt CUDA wheels"
 LABEL org.opencontainers.image.description="Artifact image (FROM scratch). Contains only /wheels for one CUDA profile."
 LABEL sd.cuda.profile="${SD_CUDA_PROFILE}"

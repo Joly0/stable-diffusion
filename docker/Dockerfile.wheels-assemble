@@ -6,7 +6,7 @@
 FROM scratch
 
 ARG SD_CUDA_PROFILE=cu130
-ARG SD_TORCH_VERSION=2.13.0
+ARG SD_TORCH_VERSION=2.12.1
 
 LABEL org.opencontainers.image.title="stable-diffusion prebuilt CUDA wheels"
 LABEL org.opencontainers.image.description="Artifact image (FROM scratch). Contains only /wheels for one CUDA profile."

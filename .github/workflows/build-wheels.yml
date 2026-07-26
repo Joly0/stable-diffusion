@@ -229,7 +229,9 @@ jobs:
             echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "commit=${GITHUB_SHA}"
             echo "wheels:"
-            ls -1 wheels 2>/dev/null | sed 's/^/  /'
+            # grep -v MANIFEST: the redirection below creates MANIFEST.txt before
+            # this block runs, so an unfiltered ls lists the manifest as a wheel.
+            ls -1 wheels 2>/dev/null | grep -v MANIFEST | sed 's/^/  /'
           } > wheels/MANIFEST.txt
           cat wheels/MANIFEST.txt
 

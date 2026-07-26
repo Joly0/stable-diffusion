@@ -70,11 +70,27 @@ cuda_profile_config() {
     # torch/torchvision are pinned as a pair: torchvision links against libtorch
     # and its ABI is not stable across torch minors, so they must move together.
     #
-    # torchaudio is deliberately NOT pinned. Its last release is 2.11.0 while
-    # torch is at 2.13, i.e. it is frozen, and it is not published for cu132 at
-    # all. Scripts that need it install it unpinned and tolerate its absence.
-    local torch_version="${SD_TORCH_VERSION_OVERRIDE:-2.13.0}"
-    local torchvision_version="${SD_TORCHVISION_VERSION_OVERRIDE:-0.28.0}"
+    # WHY 2.12.1 AND NOT THE LATEST (2.13.0)
+    # kaolin does not compile against torch 2.13. It is not merely the version
+    # assertion in its setup.py -- with IGNORE_TORCH_VER=1 set, the build fails
+    # for real in kaolin/csrc/ops/conversions/mise/mise.cpp:
+    #     error: no matching function for call to 'zeros(...)'
+    # because the at::zeros overload it uses changed signature in 2.13. Upstream
+    # kaolin declares a ceiling of 2.12.1 and that ceiling is honest. There is no
+    # open kaolin issue for 2.13, so no fix is imminent.
+    #
+    # The cost of holding here is small: 2.12.1 shipped 2026-06-18 and 2.13.0 on
+    # 2026-07-08, about three weeks apart, and 2.12.1 is published for all three
+    # profiles so nothing about GPU coverage changes.
+    #
+    # To move to 2.13.0, drop kaolin from SD_BUILD_PACKAGES and set:
+    #   SD_TORCH_VERSION_OVERRIDE=2.13.0 SD_TORCHVISION_VERSION_OVERRIDE=0.28.0
+    #
+    # torchaudio is deliberately NOT pinned. Its last release is 2.11.0, i.e. it
+    # is frozen, and it is not published for cu132 at all. Scripts that need it
+    # install it unpinned and tolerate its absence.
+    local torch_version="${SD_TORCH_VERSION_OVERRIDE:-2.12.1}"
+    local torchvision_version="${SD_TORCHVISION_VERSION_OVERRIDE:-0.27.1}"
 
     case "$profile" in
         cu132)
@@ -146,7 +162,7 @@ cuda_profile_config() {
 #
 # As of the last check the newest published coordinates are cu13torch2.10 and
 # cu12torch2.9, i.e. nothing for torch 2.11+. With the default pin of torch
-# 2.13.0 the resolver therefore finds nothing and flash-attn is simply absent.
+# 2.12.1 the resolver therefore finds nothing and flash-attn is simply absent.
 # That is the intended trade: newest torch for ComfyUI beats flash-attn, which
 # needs sm_80+ anyway (Turing needs a fork, Pascal cannot run it at all) and is
 # superseded by SageAttention 2++ for diffusion workloads.
