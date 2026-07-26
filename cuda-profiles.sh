@@ -37,7 +37,22 @@
 
 # Profiles in preference order, most modern first. The runtime picker walks this
 # list and takes the first profile the host actually satisfies.
-SD_CUDA_PROFILES="cu132 cu130 cu126"
+#
+# cu132 IS DEFINED BELOW BUT DELIBERATELY NOT LISTED HERE.
+#
+# PyTorch publishes no torchaudio for cu132 -- the index carries only a generic
+# 2.2.0 from 2024, no +cu132 build at any version. ComfyUI imports torchaudio
+# unconditionally (comfy/sd.py -> ldm/lightricks/vae/audio_vae.py), and
+# torchaudio's _check_cuda_version() refuses to load against a torch built for a
+# different CUDA minor:
+#     RuntimeError: PyTorch has CUDA version 13.2 whereas TorchAudio has 13.0
+# so ComfyUI cannot start at all on cu132.
+#
+# Nothing is lost by excluding it: cu130 and cu132 have IDENTICAL SASS arch
+# lists ({75,80,86,90,100,120}), so cu132 covers no GPU that cu130 does not.
+# It only tracks a newer CUDA minor. Re-add it to this list the day a
+# torchaudio+cu132 wheel exists.
+SD_CUDA_PROFILES="cu130 cu126"
 
 # Default when no GPU is visible at all (CPU-only container, driver not passed
 # through). cu126 has the widest hardware coverage, so it is the safe fallback.
@@ -86,11 +101,22 @@ cuda_profile_config() {
     # To move to 2.13.0, drop kaolin from SD_BUILD_PACKAGES and set:
     #   SD_TORCH_VERSION_OVERRIDE=2.13.0 SD_TORCHVISION_VERSION_OVERRIDE=0.28.0
     #
-    # torchaudio is deliberately NOT pinned. Its last release is 2.11.0, i.e. it
-    # is frozen, and it is not published for cu132 at all. Scripts that need it
-    # install it unpinned and tolerate its absence.
+    # torchaudio MUST be pinned to the profile index too, and it used to not be.
+    # Leaving it to a UI's own `pip install -r requirements.txt` resolves it from
+    # PyPI, whose only build targets CUDA 13.0, and torchaudio then refuses to
+    # load against a torch built for any other CUDA minor:
+    #     RuntimeError: Detected that PyTorch and TorchAudio were compiled with
+    #     different CUDA versions. PyTorch has CUDA version 13.2 whereas
+    #     TorchAudio has CUDA version 13.0.
+    #
+    # Its version does NOT track torch: torchaudio is frozen at 2.11.0 while
+    # torch is at 2.12.1. That pairing is fine -- verified by installing both
+    # from the cu130 index and importing torchaudio successfully -- because the
+    # check is on the CUDA version, not the torch version. What matters is only
+    # that both come from the SAME index.
     local torch_version="${SD_TORCH_VERSION_OVERRIDE:-2.12.1}"
     local torchvision_version="${SD_TORCHVISION_VERSION_OVERRIDE:-0.27.1}"
+    local torchaudio_version="${SD_TORCHAUDIO_VERSION_OVERRIDE:-2.11.0}"
 
     case "$profile" in
         cu132)
@@ -147,7 +173,15 @@ cuda_profile_config() {
     export SD_CUDA_PROFILE="$profile"
     export SD_TORCH_VERSION="$torch_version"
     export SD_TORCHVISION_VERSION="$torchvision_version"
+    export SD_TORCHAUDIO_VERSION="$torchaudio_version"
+
+    # Build-time spec: the wheel builders link against torch and torchvision
+    # only, so torchaudio is not downloaded there.
     export SD_TORCH_SPEC="torch==${torch_version} torchvision==${torchvision_version}"
+
+    # Runtime spec: adds torchaudio, which several UIs import. Anything a UI
+    # might pull from PyPI must be pinned to the profile index instead.
+    export SD_TORCH_RUNTIME_SPEC="${SD_TORCH_SPEC} torchaudio==${torchaudio_version}"
 }
 
 # -----------------------------------------------------------------------------

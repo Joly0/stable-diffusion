@@ -187,7 +187,7 @@ _report_cuda_profile() {
     fi
 
     echo "  torch index : ${TORCH_INDEX_URL}"
-    echo "  torch spec  : ${SD_TORCH_SPEC}"
+    echo "  torch spec  : ${SD_TORCH_RUNTIME_SPEC}"
     echo "  arch list   : ${TORCH_CUDA_ARCH_LIST}"
     echo "  wheels dir  : ${SD_WHEELS_DIR:-<none>}"
     echo "  cuda home   : ${CUDA_HOME:-<system default>}"
@@ -207,10 +207,16 @@ install_torch() {
         echo "install_torch: no CUDA profile selected, skipping explicit torch install."
         return 1
     fi
-    echo "Installing ${SD_TORCH_SPEC} from ${TORCH_INDEX_URL}"
+    echo "Installing ${SD_TORCH_RUNTIME_SPEC} from ${TORCH_INDEX_URL}"
     # --index-url, not --extra-index-url: the pytorch index must WIN over PyPI,
     # otherwise pip is free to pick the PyPI default build of the same version.
-    pip install "$@" ${SD_TORCH_SPEC} --index-url "${TORCH_INDEX_URL}"
+    #
+    # The RUNTIME spec is used here, which includes torchaudio. Leaving torchaudio
+    # to a UI's own requirements.txt lets pip take it from PyPI, where the only
+    # build targets CUDA 13.0; it then refuses to load against a torch from any
+    # other CUDA index ("PyTorch has CUDA version 13.2 whereas TorchAudio has
+    # CUDA version 13.0") and ComfyUI cannot start.
+    pip install "$@" ${SD_TORCH_RUNTIME_SPEC} --index-url "${TORCH_INDEX_URL}"
 }
 
 # Exports TORCH_COMMAND for the UIs that install torch from their OWN launcher
@@ -225,7 +231,7 @@ export_torch_command() {
         echo "export_torch_command: no CUDA profile selected, leaving TORCH_COMMAND alone."
         return 1
     fi
-    export TORCH_COMMAND="pip install ${SD_TORCH_SPEC} --index-url ${TORCH_INDEX_URL}"
+    export TORCH_COMMAND="pip install ${SD_TORCH_RUNTIME_SPEC} --index-url ${TORCH_INDEX_URL}"
     export TORCH_INDEX_URL
     echo "TORCH_COMMAND=${TORCH_COMMAND}"
 }

@@ -146,7 +146,11 @@ from a different index now.
 |---------|------|-----------|-------------|
 | `cu126` | Maxwell → Hopper (GTX 750 … GTX 10xx, RTX 20/30/40xx, A100, H100) | 525 | `+cu126` |
 | `cu130` | Turing → Blackwell (RTX 20xx … RTX 50xx) | 580 | `+cu130` |
-| `cu132` | Turing → Blackwell, newest CUDA | 595 | `+cu132` |
+
+A `cu132` profile is defined but **not enabled**: PyTorch publishes no
+`torchaudio` for cu132, and ComfyUI imports torchaudio unconditionally, so it
+cannot start there. Nothing is lost — cu130 and cu132 have identical GPU arch
+lists, so cu132 covers no card that cu130 does not.
 
 Why more than one: CUDA 13 dropped Maxwell, Pascal and Volta outright, and PyTorch
 dropped them from every build newer than `cu126`. So `cu126` is the only remaining

@@ -37,13 +37,13 @@ ARG WHEELS_IMAGE=ghcr.io/grokuku/sd-wheels
 
 # Per-profile wheel artifact images. Tags encode the coordinate that invalidates
 # them, so a torch bump means a new tag rather than a silent ABI mismatch.
+# cu132 is intentionally absent: it has no torchaudio build, so ComfyUI cannot
+# start on it, and it covers no GPU that cu130 does not. See cuda-profiles.sh.
 ARG WHEELS_CU126=${WHEELS_IMAGE}:cu126
 ARG WHEELS_CU130=${WHEELS_IMAGE}:cu130
-ARG WHEELS_CU132=${WHEELS_IMAGE}:cu132
 
 FROM ${WHEELS_CU126} AS wheels-cu126
 FROM ${WHEELS_CU130} AS wheels-cu130
-FROM ${WHEELS_CU132} AS wheels-cu132
 
 FROM ${BASE_IMAGE}
 
@@ -62,8 +62,8 @@ ENV BASE_DIR=/config \
 #
 # TORCH_CUDA_ARCH_LIST is deliberately NOT set here any more. It is per-profile
 # now and gets exported at container start by detect_cuda_profile(); a build-time
-# value would be wrong for two of the three profiles and would silently override
-# the correct one.
+# value would be wrong for one of the profiles and would silently override the
+# correct one.
 ENV CC=/usr/bin/gcc-13
 ENV CXX=/usr/bin/g++-13
 
@@ -97,9 +97,9 @@ RUN apt-get update -q && \
     dpkg -i packages-microsoft-prod.deb && \
     rm packages-microsoft-prod.deb && \
     apt-get update && \
-    # The CUDA 13 toolkit serves the cu130 and cu132 profiles. nvcc only has to
-    # agree with torch on the CUDA MAJOR version -- a minor difference (13.0
-    # toolkit vs a cu132 torch) is a warning, not an error.
+    # The CUDA 13 toolkit serves the cu130 profile. nvcc only has to agree with
+    # torch on the CUDA MAJOR version; a minor difference is a warning, not an
+    # error, which is also why one toolkit covers any future CUDA 13 profile.
     apt-get -y install cuda-toolkit-13-0 dotnet-sdk-8.0 && \
     # ...plus a minimal CUDA 12 compiler set for the cu126 profile. Without it a
     # Pascal / old-driver user who triggers a runtime extension build (some
@@ -142,7 +142,6 @@ RUN if [ ! -e /usr/bin/openbox-session ]; then \
 # ImportError at best and a segfault at worst.
 COPY --from=wheels-cu126 /wheels /wheels/cu126
 COPY --from=wheels-cu130 /wheels /wheels/cu130
-COPY --from=wheels-cu132 /wheels /wheels/cu132
 
 # --- Application Setup ---
 # Create application directories

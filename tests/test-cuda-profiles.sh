@@ -42,9 +42,9 @@ run_case "Titan V (7.0), driver 580"          "'7.0'"        "580.95.05"  cu126
 run_case "RTX 2080 (7.5), driver 550"         "'7.5'"        "550.144.03" cu126
 run_case "RTX 2080 (7.5), driver 580"         "'7.5'"        "580.95.05"  cu130
 run_case "RTX 3090 (8.6), driver 585"         "'8.6'"        "585.10.00"  cu130
-run_case "RTX 4090 (8.9), driver 600"         "'8.9'"        "600.00.00"  cu132
-run_case "H100 (9.0), driver 595"             "'9.0'"        "595.58.03"  cu132
-run_case "RTX 5090 (12.0), driver 610"        "'12.0'"       "610.43.02"  cu132
+run_case "RTX 4090 (8.9), driver 600"         "'8.9'"        "600.00.00"  cu130
+run_case "H100 (9.0), driver 595"             "'9.0'"        "595.58.03"  cu130
+run_case "RTX 5090 (12.0), driver 610"        "'12.0'"       "610.43.02"  cu130
 run_case "RTX 5090 (12.0), driver 585"        "'12.0'"       "585.10.00"  cu130
 
 echo "--- Blackwell on a too-old driver (must NOT land on cu126) ---"
@@ -52,11 +52,11 @@ run_case "RTX 5090 (12.0), driver 570"        "'12.0'"       "570.86.15"  cu130
 
 echo "--- multi-GPU: weakest card decides ---"
 run_case "5090 + 1080 Ti, driver 610"         "'12.0' '6.1'" "610.43.02"  cu126
-run_case "4090 + 3090, driver 600"            "'8.9' '8.6'"  "600.00.00"  cu132
+run_case "4090 + 3090, driver 600"            "'8.9' '8.6'"  "600.00.00"  cu130
 run_case "4090 + 2080, driver 585"            "'8.9' '7.5'"  "585.10.00"  cu130
 
 echo "--- degraded / edge cases ---"
-run_case "compute_cap without minor"          "'9'"          "600.00.00"  cu132
+run_case "compute_cap without minor"          "'9'"          "600.00.00"  cu130
 run_case "garbage driver string"              "'8.6'"        "unknown"    cu126
 
 echo "--- no GPU at all ---"
@@ -78,11 +78,11 @@ out=$(SD_CUDA_PROFILE=cu126 bash -c '
     && printf 'PASS  %-46s -> %s\n' "SD_CUDA_PROFILE=cu126 honoured" "$out" \
     || { printf 'FAIL  override -> %s\n' "$out"; FAILED=1; }
 
-# bogus override must be discarded and autodetect must take over (8.9 @ 600 -> cu132)
+# bogus override must be discarded and autodetect must take over (8.9 @ 600 -> cu130)
 out=$(SD_CUDA_PROFILE=nonsense bash -c '
     . ./cuda-profiles.sh; . ./functions.sh >/dev/null 2>&1
     detect_cuda_profile >/dev/null 2>&1; echo "$SD_CUDA_PROFILE"')
-[ "$out" = "cu132" ] && printf 'PASS  %-46s -> %s\n' "bogus override ignored" "$out" \
+[ "$out" = "cu130" ] && printf 'PASS  %-46s -> %s\n' "bogus override ignored" "$out" \
                      || { printf 'FAIL  bogus override -> %s\n' "$out"; FAILED=1; }
 
 rm -rf "$FAKE_BIN"
