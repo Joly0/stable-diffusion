@@ -141,7 +141,16 @@ cuda_profile_config() {
             export SD_CUDA_HOME="/usr/local/cuda-13.0"
             export TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
             export TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0 10.0 12.0"
-            export SD_SAGE_ARCH_LIST="8.0 8.6 8.9 9.0 12.0"
+            # 10.0 (datacenter Blackwell: B100/B200/GB200) must be listed
+            # explicitly. It is a different compute-capability MAJOR from both
+            # 9.0 and 12.0, so no other cubin here can serve it -- binary
+            # compatibility only covers X.y -> X.z for z >= y. torch's own cu130
+            # build ships sm_100, so omitting it left SageAttention as the one
+            # component those cards could not use.
+            #
+            # 12.1 is deliberately absent: the 12.0 cubin covers it under that
+            # same rule, which is why pytorch's own arch table stops at 120.
+            export SD_SAGE_ARCH_LIST="8.0 8.6 8.9 9.0 10.0 12.0"
             export SD_MIN_COMPUTE_CAP="7.5"
             export SD_MAX_COMPUTE_CAP="none"
             export SD_MIN_DRIVER="580"
