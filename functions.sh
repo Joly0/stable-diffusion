@@ -362,10 +362,54 @@ install_profile_wheels() {
         return 0
     fi
 
+    # These wheels change CONTENT without changing version. sageattention-2.2.0
+    # rebuilt for different architectures is still sageattention-2.2.0, so a
+    # plain `pip install` sees the requirement as satisfied and silently keeps
+    # the old one -- which is how a corrected wheel can ship in the image and a
+    # GPU still reports "SM89 kernel is not available" from the previous build.
+    #
+    # So: fingerprint the wheel set and force a reinstall whenever it changes.
+    # Content-based rather than version-based, and cheap enough to run every
+    # launch (a hash of ~80 MB), while avoiding a needless reinstall when it has
+    # not moved.
+    # The stamp lives inside the ACTIVE environment's site-packages, which is on
+    # the persistent /config volume, so it survives container restarts -- and it
+    # is located from the interpreter itself rather than from CONDA_PREFIX,
+    # which is set by conda's activate script and is not guaranteed here.
+    #
+    # If the location cannot be determined, fall back to a plain install rather
+    # than forcing one. Getting that wrong would reinstall every wheel on every
+    # single boot, which is far worse than the stale-wheel case this guards
+    # against.
+    local site_packages stamp_file="" current="" w
+    site_packages=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])' 2>/dev/null)
+    if [ -n "$site_packages" ] && [ -d "$site_packages" ]; then
+        stamp_file="${site_packages}/.sd-prebuilt-wheels.sha256"
+        # LC_ALL=C sort: the hash must not depend on the locale's glob
+        # collation order, or it would differ between otherwise identical runs.
+        current=$(for w in "${wheels[@]}"; do sha256sum "$w" 2>/dev/null; done \
+                  | LC_ALL=C sort | sha256sum | cut -d' ' -f1)
+    fi
+
+    if [ -n "$stamp_file" ] && [ -n "$current" ] \
+       && [ "$(cat "$stamp_file" 2>/dev/null)" = "$current" ]; then
+        echo "Prebuilt wheels unchanged since last launch, skipping reinstall."
+        return 0
+    fi
+
     echo "Installing prebuilt wheels from ${SD_WHEELS_DIR}"
     # --no-deps: these wheels declare a bare `torch` requirement, and without
     # this pip happily REPLACES the profile-matched torch we just installed.
-    pip install --no-deps "${wheels[@]}"
+    if [ -n "$stamp_file" ]; then
+        # --force-reinstall: see the fingerprint note above. Only used when we
+        # can record that it happened, so it runs once per wheel change.
+        pip install --no-deps --force-reinstall "${wheels[@]}" || return 1
+        printf '%s\n' "$current" > "$stamp_file"
+    else
+        echo "(could not locate site-packages; installing without force)"
+        pip install --no-deps "${wheels[@]}" || return 1
+    fi
+    return 0
 }
 
 #Function to move folder and replace with symlink
