@@ -245,13 +245,29 @@ EOF
 ARG SD_BUILD_PACKAGES="flash-attn sageattention diso nvdiffrast kaolin"
 ENV SD_BUILD_PACKAGES=${SD_BUILD_PACKAGES}
 
-# --- flash-attention: DOWNLOADED, not compiled ---
-# This used to be the single most expensive step in the repo (~96 CUDA files x
-# several arch targets, hours of wall time, the usual OOM culprit). Dao-AILab
-# publishes ~50 prebuilt assets per release; see scripts/fetch-flash-attn.sh for
-# why a matching asset is a safe substitute and why a miss is not fatal.
+COPY scripts/verify-wheel-arches.sh /usr/local/bin/verify-wheel-arches
+RUN chmod +x /usr/local/bin/verify-wheel-arches
+
+# --- flash-attention: downloaded when possible, compiled when not ---
+#
+# NVCC_THREADS=1 is not optional. flash-attn's setup.py defaults it to 4 and
+# multiplies it by MAX_JOBS, so leaving it alone quadruples real concurrency and
+# is the classic cause of this build being OOM-killed.
+#
+# FLASH_ATTN_CUDA_ARCHS, not TORCH_CUDA_ARCH_LIST: flash-attn ignores the latter
+# entirely and reads its own variable, in its own format (bare numbers, no dots).
+# It also SILENTLY DROPS arches its toolkit cannot build -- 100/120 need CUDA
+# >= 12.8 -- which is why verify-wheel-arches runs on the result.
+# Downloading is still strongly preferred and is tried first: Dao-AILab publishes
+# ~50 prebuilt assets per release, and compiling this is the single most
+# expensive step in the repo. But no asset currently matches torch 2.12, and the
+# package is wanted, so the source build is the fallback rather than the default.
+# The day a matching coordinate is published the download wins again, with no
+# config change.
 COPY scripts/fetch-flash-attn.sh /usr/local/bin/fetch-flash-attn
-RUN chmod +x /usr/local/bin/fetch-flash-attn \
+ARG SD_FLASH_ARCH_LIST="80;90;100;120"
+RUN --mount=type=cache,target=/ccache,sharing=locked \
+    chmod +x /usr/local/bin/fetch-flash-attn \
  && if want-pkg flash-attn; then \
       SD_FLASH_ATTN_VERSION="${SD_FLASH_ATTN_VERSION}" \
       SD_FLASH_ATTN_REPO="${SD_FLASH_ATTN_REPO}" \
@@ -260,6 +276,19 @@ RUN chmod +x /usr/local/bin/fetch-flash-attn \
       PYTHON_TAG="${PYTHON_TAG}" \
       GITHUB_TOKEN="${GITHUB_TOKEN}" \
       fetch-flash-attn /build; \
+      if ls /build/flash_attn-*.whl >/dev/null 2>&1; then \
+        echo "flash-attn: prebuilt wheel used, no compile needed"; \
+      else \
+        echo "flash-attn: no prebuilt for this coordinate, building from source"; \
+        git clone --depth 1 --branch "v${SD_FLASH_ATTN_VERSION}" --recurse-submodules \
+            "https://github.com/${SD_FLASH_ATTN_REPO}.git" flash-attention \
+        && cd flash-attention \
+        && export NVCC_THREADS=1 FLASH_ATTN_CUDA_ARCHS="${SD_FLASH_ARCH_LIST}" \
+        && MAX_JOBS=$(max-jobs 5) python${PYTHON_VERSION} setup.py bdist_wheel \
+        && verify-wheel-arches dist/*.whl "${SD_FLASH_ARCH_LIST}" \
+        && cp dist/*.whl /build/ \
+        && cd /build && rm -rf flash-attention; \
+      fi; \
     else echo "skip flash-attn"; fi
 
 # --- SageAttention 2 / 2++ ---
@@ -270,9 +299,6 @@ RUN chmod +x /usr/local/bin/fetch-flash-attn \
 #
 # setup.py falls back to TORCH_CUDA_ARCH_LIST when no GPU is present, so it
 # builds fine headless. NVCC_THREADS=1 for the reason in the max-jobs comment.
-COPY scripts/verify-wheel-arches.sh /usr/local/bin/verify-wheel-arches
-RUN chmod +x /usr/local/bin/verify-wheel-arches
-
 # EXT_PARALLEL=1 is load-bearing. SageAttention's setup.py reuses MAX_JOBS as its
 # EXTENSION-level parallelism when EXT_PARALLEL is unset:
 #     if parallel is None and 'MAX_JOBS' in os.environ:

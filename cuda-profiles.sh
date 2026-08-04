@@ -74,6 +74,7 @@ SD_CUDA_PROFILE_FALLBACK="cu126"
 #   SD_TORCH_SPEC          ready-to-use pip argument string
 #   TORCH_CUDA_ARCH_LIST   arch list for generic CUDA extension builds
 #   SD_SAGE_ARCH_LIST      narrower arch list for SageAttention (sm80+ only)
+#   SD_FLASH_ARCH_LIST     arch list for flash-attention, in ITS format (80;90;...)
 #   SD_MIN_COMPUTE_CAP     lowest compute capability this profile supports
 #   SD_MAX_COMPUTE_CAP     highest compute capability this profile supports,
 #                          or "none" when the profile has no upper bound
@@ -130,6 +131,7 @@ cuda_profile_config() {
             export TORCH_INDEX_URL="https://download.pytorch.org/whl/cu132"
             export TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.9;9.0;10.0;12.0"
             export SD_SAGE_ARCH_LIST="8.0;8.6;8.9;10.0;12.0"
+            export SD_FLASH_ARCH_LIST="80;90;100;120"
             export SD_MIN_COMPUTE_CAP="7.5"
             export SD_MAX_COMPUTE_CAP="none"
             export SD_MIN_DRIVER="595"
@@ -163,6 +165,11 @@ cuda_profile_config() {
             # consumer GPU. _qattn_sm89 is unaffected -- its FP8 paths are
             # guarded by __CUDA_ARCH__ and compile away on lower targets.
             export SD_SAGE_ARCH_LIST="8.0;8.6;8.9;10.0;12.0"
+            # flash-attn uses its OWN variable and its own format: bare numbers,
+            # semicolon separated, and only arches it has kernels for. 8.6/8.9
+            # are covered by the sm_80 cubin. 110 (Thor) is skipped -- torch
+            # does not ship it either.
+            export SD_FLASH_ARCH_LIST="80;90;100;120"
             export SD_MIN_COMPUTE_CAP="7.5"
             export SD_MAX_COMPUTE_CAP="none"
             export SD_MIN_DRIVER="580"
@@ -179,6 +186,11 @@ cuda_profile_config() {
             export TORCH_CUDA_ARCH_LIST="6.1;7.0;7.5;8.0;8.6;8.9;9.0"
             # 9.0 excluded for the same reason as cu130 above.
             export SD_SAGE_ARCH_LIST="8.0;8.6;8.9"
+            # No 100/120: flash-attn gates those on CUDA >= 12.8 and this
+            # profile builds with 12.6, so it would SILENTLY drop them and
+            # produce a wheel missing arches we asked for. verify-wheel-arches
+            # would catch that, but not asking is better than being caught.
+            export SD_FLASH_ARCH_LIST="80;90"
             export SD_MIN_COMPUTE_CAP="5.0"
             # Hard upper bound: cu126 has no sm_100/sm_120 kernels, so a
             # Blackwell card must never be routed here even though it satisfies
@@ -216,16 +228,14 @@ cuda_profile_config() {
 # libtorch, whose C++ ABI changes every minor. A wheel built for torch 2.10 will
 # not import under torch 2.13.
 #
-# As of the last check the newest published coordinates are cu13torch2.10 and
-# cu12torch2.9, i.e. nothing for torch 2.11+. With the default pin of torch
-# 2.12.1 the resolver therefore finds nothing and flash-attn is simply absent.
-# That is the intended trade: newest torch for ComfyUI beats flash-attn, which
-# needs sm_80+ anyway (Turing needs a fork, Pascal cannot run it at all) and is
-# superseded by SageAttention 2++ for diffusion workloads.
+# The newest published coordinates are cu13torch2.9 / cu12torch2.8 -- nothing
+# for the torch 2.12.1 pinned here. So the build DOWNLOADS a matching wheel when
+# one exists and COMPILES from source when it does not. The cheap path is taken
+# automatically the day upstream publishes a matching coordinate, without anyone
+# having to move a pin to get it.
 #
-# To actually get flash-attn, pin a profile back to a supported torch minor:
-#   SD_TORCH_VERSION_OVERRIDE=2.10.0 SD_TORCHVISION_VERSION_OVERRIDE=0.25.0  (cu130)
-#   SD_TORCH_VERSION_OVERRIDE=2.9.1  SD_TORCHVISION_VERSION_OVERRIDE=0.24.1  (cu126)
+# flash-attn needs sm_80+ regardless: Turing needs a separate fork and Pascal
+# cannot run it at all.
 # -----------------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 # SageAttention build variants

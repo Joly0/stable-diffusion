@@ -24,9 +24,10 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 mode="${1:?usage: profile-matrix.sh profiles|builds}"
 
-# flash-attn is intentionally NOT here: it is downloaded, not compiled, so it
-# does not need a CUDA build image at all and gets its own cheap CI job.
-packages="${SD_BUILD_PACKAGES:-sageattention diso nvdiffrast kaolin}"
+# flash-attn IS here now. Its step still tries the prebuilt download first, but
+# no published asset matches the pinned torch, so it needs a CUDA image and a
+# real build budget like the rest.
+packages="${SD_BUILD_PACKAGES:-flash-attn sageattention diso nvdiffrast kaolin}"
 profiles="${SD_PROFILES:-${SD_CUDA_PROFILES}}"
 
 # emit_profile_json <profile> [package] [sage_arch_list] [wheel_subdir]
@@ -44,12 +45,13 @@ print(json.dumps({
     "torch_spec":   sys.argv[6],
     "arch_list":    sys.argv[7],
     "sage_arch_list": sys.argv[8],
+    "flash_arch_list": sys.argv[11],
     "package":      sys.argv[9],
     "wheel_subdir": sys.argv[10],
     "job":          sys.argv[9] + ("-" + sys.argv[10] if sys.argv[10] else ""),
 }))' "$p" "$SD_CUDA_MAJOR" "$SD_CUDA_IMAGE" "$TORCH_INDEX_URL" \
      "$SD_TORCH_VERSION" "$SD_TORCH_SPEC" "$TORCH_CUDA_ARCH_LIST" \
-     "${3:-$SD_SAGE_ARCH_LIST}" "${2:-}" "${4:-}"
+     "${3:-$SD_SAGE_ARCH_LIST}" "${2:-}" "${4:-}" "$SD_FLASH_ARCH_LIST"
 }
 
 # Does this profile have GPUs that a given variant would serve? A profile whose

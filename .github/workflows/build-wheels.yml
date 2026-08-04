@@ -14,8 +14,9 @@ name: Build CUDA wheel images
 #     instead of one serial job that has to fit every compile into a single
 #     budget and OOMs partway through.
 #
-#   * flash-attn is fetched, not compiled (see scripts/fetch-flash-attn.sh). It
-#     used to dominate the build. Its job needs no CUDA image at all.
+#   * flash-attn tries the prebuilt download first and compiles only if no
+#     published asset matches the pinned torch. It is the most expensive step
+#     when it does compile, which is why it gets its own isolated job.
 #
 #   * The old workflow set `no-cache: true` alongside `cache-from: type=gha`,
 #     which cancelled the cache out and made every run cold. Gone.
@@ -89,42 +90,6 @@ jobs:
           echo "--- builds ---";   ./scripts/profile-matrix.sh builds   | python3 -m json.tool
 
   # ---------------------------------------------------------------------------
-  # Prebuilt wheels: pure download, no CUDA image, ~1 minute.
-  # ---------------------------------------------------------------------------
-  fetch-prebuilt:
-    name: fetch prebuilt (${{ matrix.profile }})
-    needs: matrix
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.matrix.outputs.profiles) }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Fetch prebuilt flash-attention wheel
-        env:
-          SD_CUDA_MAJOR: ${{ matrix.cuda_major }}
-          SD_TORCH_VERSION: ${{ matrix.torch_version }}
-          PYTHON_TAG: ${{ env.PYTHON_TAG }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # SD_FLASH_ATTN_VERSION / _REPO come from cuda-profiles.sh.
-          . ./cuda-profiles.sh
-          export SD_FLASH_ATTN_VERSION SD_FLASH_ATTN_REPO
-          mkdir -p out
-          ./scripts/fetch-flash-attn.sh out
-          ls -la out || true
-
-      # Wheels are optional, so allow an empty directory rather than failing.
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-${{ matrix.profile }}-prebuilt
-          path: out/
-          if-no-files-found: ignore
-          retention-days: 3
-
-  # ---------------------------------------------------------------------------
   # Compiled wheels: one job per (profile, package).
   # ---------------------------------------------------------------------------
   build:
@@ -182,6 +147,7 @@ jobs:
             SD_TORCH_VERSION=${{ matrix.torch_version }}
             TORCH_CUDA_ARCH_LIST=${{ matrix.arch_list }}
             SD_SAGE_ARCH_LIST=${{ matrix.sage_arch_list }}
+            SD_FLASH_ARCH_LIST=${{ matrix.flash_arch_list }}
             SD_BUILD_PACKAGES=${{ matrix.package }}
             SD_WHEEL_SUBDIR=${{ matrix.wheel_subdir }}
             PYTHON_VERSION=${{ env.PYTHON_VERSION }}
@@ -190,6 +156,7 @@ jobs:
             # reads the host's /proc/meminfo, not its cgroup cap, and would
             # otherwise size the job count for a much bigger machine.
             BUILD_MEM_GB=14
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
           # Registry cache, NOT type=gha. The GitHub Actions cache is capped at
           # 10 GB per REPOSITORY, and one builder stage here is already ~13 GB
           # (the nvidia/cuda devel base plus apt and torch). With mode=max and
@@ -223,7 +190,7 @@ jobs:
   # ---------------------------------------------------------------------------
   assemble:
     name: assemble ${{ matrix.profile }}
-    needs: [matrix, fetch-prebuilt, build]
+    needs: [matrix, build]
     # Publish whatever succeeded: a single package failing should not block the
     # rest of the profile, since each wheel is independently optional.
     if: always()
